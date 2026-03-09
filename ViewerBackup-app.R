@@ -434,7 +434,7 @@ server <- function(input, output, session) {
       updateSelectInput(session, "var_picker", choices = character(0))
     }
   }, ignoreInit = FALSE)
-  
+    
   output$qc_table <- DT::renderDT({
     f <- input$report_file
     s <- input$sheet
