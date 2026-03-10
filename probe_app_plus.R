@@ -1,4 +1,4 @@
-# ---- app.R : Probe + Loader/Profiler + QC Viewer + side-by-side Data Editor ----
+# ---- app.R : Probe + Loader/Profiler + QC Viewer + floating Data Editor ----
 library(shiny)
 library(openxlsx)
 library(callr)
@@ -10,6 +10,83 @@ library(tools)
 library(dplyr)
 
 ui <- fluidPage(
+  
+  # ---------- Floating Editor: CSS + Drag JS ----------
+  tags$head(
+    tags$style(HTML("
+    .editor-float {
+      position: fixed;
+      top: 72px;
+      left: calc(100vw - 736px);  /* 720px width + 16px margin */
+      width: 720px; height: 600px;
+      background: #fff;
+      border: 1px solid #d0d7de;
+      box-shadow: 0 12px 24px rgba(0,0,0,0.18);
+      display: flex; flex-direction: column;
+      resize: both;
+      overflow: hidden;
+      border-radius: 10px;
+    }
+    .editor-float-header {
+      height: 46px;
+      background: #0ea5e9;
+      color: #fff;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 12px;
+      cursor: move;
+      user-select: none; -webkit-user-select: none; touch-action: none;
+    }
+    .editor-float-title { font-weight: 600; }
+    .editor-float-controls > .btn-link {
+      color: #fff; text-decoration: none; font-size: 18px; padding: 0 6px;
+    }
+    .editor-float-body {
+      flex: 1 1 auto; overflow: auto; padding: 12px; background: #fafafa;
+    }
+
+    /* Layer and visibility control */
+    .editor-float.front  { z-index: 2050; }           /* above app */
+    .editor-float.behind { z-index: 10;   }           /* behind app (not used if hidden) */
+    .editor-float.hidden { display: none !important; }/* completely hidden */
+  ")),
+    
+    # Global hide/show: outside click -> hide; open button -> show; Esc -> hide
+    tags$script(HTML("
+    (function(){
+      function getEd(){ return document.getElementById('editor_float'); }
+
+      // Hide editor when clicking anywhere outside the editor and not the 'open_editor' button
+      document.addEventListener('mousedown', function(ev){
+        var ed = getEd(); if (!ed) return;
+        var isOutside = !ed.contains(ev.target);
+        var openBtn   = ev.target.closest && ev.target.closest('#open_editor');
+        if (isOutside && !openBtn) {
+          ed.classList.add('hidden');
+          ed.classList.remove('front');
+        }
+      }, true);
+
+      // Show editor when clicking the 'Open editor (pop-out)' button
+      document.addEventListener('click', function(ev){
+        var openBtn = ev.target.closest && ev.target.closest('#open_editor');
+        if (openBtn) {
+          var ed = getEd(); if (!ed) return;
+          ed.classList.remove('hidden');
+          ed.classList.add('front');
+        }
+      }, true);
+
+      // Press Esc to hide the editor
+      document.addEventListener('keydown', function(ev){
+        if (ev.key === 'Escape') {
+          var ed = getEd(); if (ed) ed.classList.add('hidden');
+        }
+      }, true);
+    })();
+  "))
+  ),
+  # ---------- End: Floating Editor HEAD ----------
+  
   titlePanel("SOMEC — Probe + Loader/Profiler + QC Viewer + Data Editor"),
   
   sidebarLayout(
@@ -33,13 +110,12 @@ ui <- fluidPage(
         # ----- TAB 1: Probe -----
         tabPanel(
           "Probe",
-          # shared report menus moved to Viewer; Probe reads current selections
           h4("Console"), verbatimTextOutput("log", placeholder = TRUE),
           tags$hr(),
           h4("Sheets in selected file"), verbatimTextOutput("sheets", placeholder = TRUE)
         ),
         
-        # ----- TAB 2: QC Viewer + Data Editor side-by-side -----
+        # ----- TAB 2: QC Viewer (menus on left, viewer center; editor is floating) -----
         tabPanel(
           "QC Viewer",
           fluidRow(
@@ -76,36 +152,21 @@ ui <- fluidPage(
               DTOutput("qc_table"),
               tags$hr(),
               h4("Embedded images"),
-              uiOutput("img_gallery")
-            ),
-            
-            # ---- RIGHT: Data Editor ----
-            column(
-              width = 4,
-              h4("Data editor"),
-              helpText("Set ACCDB path in the left sidebar above (Access DB)."),
-              fluidRow(
-                column(6, actionButton("load_accdb", "Load ACCDB")),
-                column(6, textInput("accdb_copy", "Save to COPY (.accdb):",
-                                    value = "", width = "100%"))
-              ),
-              tags$small("Tip: pick a COPY path above before saving."),
+              uiOutput("img_gallery"),
               tags$hr(),
-              selectInput("mission_filter", "Mission to edit:", choices = character(0)),
-              tabsetPanel(
-                id = "editor_tabs",
-                tabPanel("Missions",     DTOutput("missions_dt")),
-                tabPanel("Transects",    DTOutput("transects_dt")),
-                tabPanel("Observations", DTOutput("observations_dt"))
-              ),
-              tags$hr(),
-              actionButton("save_edits", "Save edits to COPY")
+              actionButton("open_editor", "Open editor (pop‑out)")
             )
           )
         )
-      )
+      ),
+      
+      # ---------- Floating Editor placeholder (rendered by server when open) ----------
+      uiOutput("editor_floating_panel")
+      # ---------- End Floating Editor placeholder ----------
+      
     )
   )
+  
 )
 
 server <- function(input, output, session) {
@@ -241,12 +302,7 @@ server <- function(input, output, session) {
     hit <- which(sn == sheet_name)
     if (length(hit)) hit[1] else NA_integer_
   }
-  resolve_target <- function(tmp_root, base_dir, target) {
-    if (grepl("^/", target)) {
-      return(normalizePath(file.path(tmpdir, sub("^/", "", target)), winslash = "/", mustWork = FALSE))
-    }
-    normalizePath(file.path(base_dir, target), winslash = "/", mustWork = FALSE)
-  }
+  
   extract_images_with_anchors <- function(xlsx, sheet_idx) {
     out <- data.frame(img_path = character(0), row = integer(0), col = integer(0), stringsAsFactors = FALSE)
     if (is.na(sheet_idx) || sheet_idx <= 0) return(out)
@@ -323,7 +379,17 @@ server <- function(input, output, session) {
     do.call(rbind, all_rows)
   }
   
+  extract_all_images <- function(xlsx) {
+    tmpdir <- tempfile("unz_"); dir.create(tmpdir, showWarnings = FALSE, recursive = TRUE)
+    utils::unzip(xlsx, exdir = tmpdir)
+    media_dir <- file.path(tmpdir, "xl", "media")
+    if (!dir.exists(media_dir)) return(character(0))
+    list.files(media_dir, full.names = TRUE)
+  }
+  
   rv_img_index <- reactiveVal(NULL)
+  rv_qc_df <- reactiveVal(NULL)
+  
   observeEvent(list(input$file, input$sheet), {
     f <- input$file; s <- input$sheet
     if (!isTruthy(f) || !file.exists(f) || !isTruthy(s)) {
@@ -415,8 +481,13 @@ server <- function(input, output, session) {
         if (length(fill_idx)) col_names[fill_idx] <- paste0("Col_", keep[fill_idx])
         col_names <- make.unique(col_names, sep = "_"); names(df) <- col_names
         
-        return(DT::datatable(df, options  = list(dom = 't', paging = FALSE, ordering = FALSE, info = FALSE),
-                             rownames = FALSE))
+        rv_qc_df(df)
+        return(DT::datatable(
+          df,
+          options  = list(dom = 't', paging = FALSE, ordering = FALSE, info = FALSE),
+          selection = "single",
+          rownames = FALSE
+        ))
       }
     }
     
@@ -426,12 +497,21 @@ server <- function(input, output, session) {
     validate(need(is.data.frame(df), paste("Cannot read sheet:", s)))
     fix_names <- function(x) { x <- as.character(x); x[is.na(x) | x == ""] <- "X"; make.unique(x, sep = "_") }
     names(df) <- fix_names(names(df))
+    
     if (nrow(df) == 0 && ncol(df) == 0) {
+      rv_qc_df(df)
       return(DT::datatable(data.frame(note = sprintf("Sheet '%s' is empty.", s)),
                            options = list(dom = 't', paging = FALSE, ordering = FALSE, info = FALSE),
                            rownames = FALSE))
     }
-    DT::datatable(df, options = list(pageLength = 15, scrollX = TRUE), rownames = FALSE)
+    
+    rv_qc_df(df)
+    DT::datatable(
+      df,
+      options   = list(pageLength = 15, scrollX = TRUE),
+      selection = "single",
+      rownames  = FALSE
+    )
   })
   
   output$img_gallery <- renderUI({
@@ -473,7 +553,7 @@ server <- function(input, output, session) {
   })
   
   # ---------- Data Editor ----------
-  # Load from Access DB
+  # Load from Access DB (sidebar version; optional)
   load_from_access <- function() {
     ap <- input$accdb_path
     if (!isTruthy(ap) || !file.exists(ap)) {
@@ -492,7 +572,6 @@ server <- function(input, output, session) {
     }
     on.exit(RODBC::odbcClose(con), add = TRUE)
     
-    # Fetch three base tables
     rv$missions     <- tryCatch(RODBC::sqlFetch(con, "missions"),     error = function(e) NULL)
     rv$transects    <- tryCatch(RODBC::sqlFetch(con, "transects"),    error = function(e) NULL)
     rv$observations <- tryCatch(RODBC::sqlFetch(con, "observations"), error = function(e) NULL)
@@ -504,7 +583,7 @@ server <- function(input, output, session) {
                ", transects=", nrow(rv$transects),
                ", observations=", nrow(rv$observations))
     
-    # Mission filter options
+    # Mission filter options (legacy; not used in floating editor)
     m_uniq <- sort(unique(as.character(rv$missions$mission)))
     updateSelectInput(session, "mission_filter", choices = m_uniq,
                       selected = if (length(m_uniq)) m_uniq[1] else character(0))
@@ -522,7 +601,304 @@ server <- function(input, output, session) {
     if (isTRUE(ok)) append_log("[ui] ACCDB loaded.")
   })
   
-  # Filtered edits
+  # ---- OPEN/CLOSE STATE ----
+  editor_open <- reactiveVal(FALSE)
+  
+  # Button in the Viewer ("Open editor (pop-out)")
+  observeEvent(input$open_editor, {
+    editor_open(TRUE)
+    # Prefill panel ACCDB path from the sidebar
+    ap <- input$accdb_path
+    if (isTruthy(ap)) {
+      updateTextInput(session, "accdb_path_modal", value = ap)
+      if (file.exists(ap)) {
+        updateTextInput(session, "accdb_copy_modal",
+                        value = file.path(dirname(ap), "SOMEC_EDIT_COPY.accdb"))
+      }
+    }
+  })
+  
+  # ---- FLOATING EDITOR BODY (builder)----
+  editor_floating_body <- function() {
+    tagList(
+      fluidRow(
+        column(
+          width = 5,
+          h4("Editor controls"),
+          helpText("Set the Access DB path here or in the left sidebar. Paths stay in sync."),
+          textInput("accdb_path_modal", "Access DB (.accdb):", value = "", width = "100%"),
+          fluidRow(
+            column(6, actionButton("load_accdb_modal", "Load ACCDB")),
+            column(6, textInput("accdb_copy_modal", "Save to COPY (.accdb):",
+                                value = "", width = "100%"))
+          ),
+          tags$small("Tip: pick a COPY path above before saving."),
+          tags$hr(),
+          selectInput("mission_filter_modal", "Mission to edit:", choices = character(0)),
+          tags$hr(),
+          actionButton("save_edits_modal", "Save edits to COPY")
+        ),
+        column(
+          width = 7,
+          tabsetPanel(
+            id = "editor_tabs_modal",
+            tabPanel("Missions",     DTOutput("missions_dt_modal")),
+            tabPanel("Transects",    DTOutput("transects_dt_modal")),
+            tabPanel("Observations", DTOutput("observations_dt_modal"))
+          )
+        )
+      )
+    )
+  }
+  
+  # ---- FLOATING EDITOR SHELL ----
+  output$editor_floating_panel <- renderUI({
+    if (!isTRUE(editor_open())) return(NULL)
+    
+    panel <- tags$div(
+      id    = "editor_float",
+      class = "editor-float front",         # <— add 'front' here
+      style = "top:72px; left: calc(100vw - 736px);",
+      tags$div(
+        id = "editor_float_header",
+        class = "editor-float-header",
+        tags$span(class = "editor-float-title", "SOMEC — Data Editor"),
+        tags$div(class = "editor-float-controls",
+                 actionLink("close_editor", label = "\u00D7", class = "btn-link", title = "Close")
+        )
+      ),
+      tags$div(class = "editor-float-body", editor_floating_body())
+    )
+    
+    # Inline, robust drag binder: runs after the panel is in the DOM.
+    binder <- tags$script(HTML("
+    (function() {
+      var el = document.getElementById('editor_float');
+      var hd = document.getElementById('editor_float_header');
+      if (!el || !hd) return;
+
+      // Only bind once
+      if (el.dataset.dragBound === '1') return;
+      el.dataset.dragBound = '1';
+
+      // Ensure we only use left/top (never right)
+      el.style.right = 'auto';
+      if (!el.style.left)  el.style.left  = (window.innerWidth - 736) + 'px';
+      if (!el.style.top)   el.style.top   = '72px';
+
+      var startX=0, startY=0, startLeft=0, startTop=0, moving=false;
+
+      function onDown(e) {
+        e.preventDefault();
+        
+        el.classList.remove('hidden');
+        el.classList.add('front');
+
+        var rect = el.getBoundingClientRect();
+        startLeft = rect.left;
+        startTop  = rect.top;
+        startX    = e.clientX;
+        startY    = e.clientY;
+        moving    = true;
+        document.addEventListener('mousemove', onMove, true);
+        document.addEventListener('mouseup', onUp, true);
+      }
+      function onMove(e) {
+        if (!moving) return;
+        e.preventDefault();
+        var dx = e.clientX - startX;
+        var dy = e.clientY - startY;
+        el.style.left = (startLeft + dx) + 'px';
+        el.style.top  = (startTop  + dy) + 'px';
+      }
+      function onUp() {
+        moving = false;
+        document.removeEventListener('mousemove', onMove, true);
+        document.removeEventListener('mouseup', onUp, true);
+      }
+
+      // Use capture so nested elements inside header don't block the mousedown
+      hd.addEventListener('mousedown', onDown, true);
+      // Touch support (optional)
+      hd.addEventListener('touchstart', function(ev){
+        if (!ev.touches || !ev.touches.length) return;
+        var t = ev.touches[0];
+        var rect = el.getBoundingClientRect();
+        startLeft = rect.left; startTop = rect.top;
+        startX = t.clientX; startY = t.clientY; moving = true;
+        function tMove(evt){
+          var tt = evt.touches[0]; if (!tt) return;
+          var dx = tt.clientX - startX, dy = tt.clientY - startY;
+          el.style.left = (startLeft + dx) + 'px';
+          el.style.top  = (startTop  + dy) + 'px';
+        }
+        function tEnd(){
+          moving = false;
+          document.removeEventListener('touchmove', tMove, true);
+          document.removeEventListener('touchend', tEnd, true);
+        }
+        document.addEventListener('touchmove', tMove, true);
+        document.addEventListener('touchend', tEnd, true);
+      }, {passive:false, capture:true});
+    })();
+  "))
+    
+    # Return panel + inline binder
+    tagList(panel, binder)
+  })
+  
+  # "× Close" button inside the floating panel
+  observeEvent(input$close_editor, {
+    editor_open(FALSE)
+  })
+  
+  # Sidebar -> Panel
+  observeEvent(input$accdb_path, {
+    if (isTruthy(input$accdb_path) &&
+        !identical(input$accdb_path, input$accdb_path_modal)) {
+      updateTextInput(session, "accdb_path_modal", value = input$accdb_path)
+    }
+  }, ignoreInit = TRUE)
+  
+  # Panel -> Sidebar
+  observeEvent(input$accdb_path_modal, {
+    if (isTruthy(input$accdb_path_modal) &&
+        !identical(input$accdb_path_modal, input$accdb_path)) {
+      updateTextInput(session, "accdb_path", value = input$accdb_path_modal)
+    }
+  }, ignoreInit = TRUE)
+  
+  # Helper that loads 3 base tables from a given path
+  load_from_access_path <- function(ap) {
+    if (!isTruthy(ap) || !file.exists(ap)) {
+      append_log("[access] ACCDB not found: ", ap); return(invisible(FALSE))
+    }
+    append_log("[access] Opening: ", ap)
+    con <- try(RODBC::odbcConnectAccess2007(ap, believeNRows = FALSE), silent = TRUE)
+    if (inherits(con, "try-error") || is.null(con) || isTRUE(con < 0)) {
+      append_log("[access] odbcConnectAccess2007 failed. Trying DriverConnect…")
+      conn_str <- paste0("Driver={Microsoft Access Driver (*.mdb, *.accdb)};", "DBQ=", ap, ";Uid=;Pwd=;")
+      con <- try(RODBC::odbcDriverConnect(conn_str), silent = TRUE)
+      if (inherits(con, "try-error") || is.null(con) || isTRUE(con < 0)) {
+        append_log("[access][ERROR] Cannot open ODBC channel to ACCDB.")
+        return(invisible(FALSE))
+      }
+    }
+    on.exit(RODBC::odbcClose(con), add = TRUE)
+    
+    rv$missions     <- tryCatch(RODBC::sqlFetch(con, "missions"),     error = function(e) NULL)
+    rv$transects    <- tryCatch(RODBC::sqlFetch(con, "transects"),    error = function(e) NULL)
+    rv$observations <- tryCatch(RODBC::sqlFetch(con, "observations"), error = function(e) NULL)
+    if (is.null(rv$missions) || is.null(rv$transects) || is.null(rv$observations)) {
+      append_log("[access][ERROR] One or more base tables not found.")
+      return(invisible(FALSE))
+    }
+    append_log("[access] Loaded: missions=", nrow(rv$missions),
+               ", transects=", nrow(rv$transects),
+               ", observations=", nrow(rv$observations))
+    
+    # Fill the panel mission filter
+    m_uniq <- sort(unique(as.character(rv$missions$mission)))
+    updateSelectInput(session, "mission_filter_modal", choices = m_uniq,
+                      selected = if (length(m_uniq)) m_uniq[1] else character(0))
+    TRUE
+  }
+  
+  # Panel "Load ACCDB"
+  observeEvent(input$load_accdb_modal, {
+    ap <- input$accdb_path_modal %||% input$accdb_path
+    ok <- load_from_access_path(ap)
+    if (isTRUE(ok)) append_log("[ui][panel] ACCDB loaded.")
+  })
+  
+  # Keep modal editor slices in sync with modal filter
+  observe({
+    req(input$mission_filter_modal, rv$missions, rv$transects, rv$observations)
+    rv$missions_edit     <- rv$missions     %>% filter(.data$mission == input$mission_filter_modal)
+    rv$transects_edit    <- rv$transects    %>% filter(.data$mission == input$mission_filter_modal)
+    rv$observations_edit <- rv$observations %>% filter(.data$mission == input$mission_filter_modal)
+  })
+  
+  rv_hi <- reactiveValues(
+    missions = integer(0),
+    transects = integer(0),
+    observations = integer(0)
+  )
+  
+  render_editable_dt_hi <- function(data_react, hi_key) {
+    renderDT({
+      df <- data_react(); req(is.data.frame(df))
+      hi_idx <- rv_hi[[hi_key]] %||% integer(0)     # 1-based
+      hi_js  <- if (length(hi_idx)) paste0(hi_idx - 1L, collapse = ",") else ""
+      row_cb <- DT::JS(
+        "function(row, data, displayNum, displayIndex, dataIndex) {",
+        sprintf("  var hi = [%s];", hi_js),
+        "  if (hi.indexOf(dataIndex) !== -1) {",
+        "    $(row).css({'background-color':'#fff7b1'});",
+        "  }",
+        "}"
+      )
+      datatable(
+        df, editable = "cell",
+        selection = "single", rownames = FALSE,
+        options   = list(scrollX = TRUE, pageLength = 10, rowCallback = row_cb)
+      )
+    })
+  }
+  
+  # Use the highlighting renderer for the panel tables
+  output$missions_dt_modal     <- render_editable_dt_hi(reactive(rv$missions_edit),     "missions")
+  output$transects_dt_modal    <- render_editable_dt_hi(reactive(rv$transects_edit),    "transects")
+  output$observations_dt_modal <- render_editable_dt_hi(reactive(rv$observations_edit), "observations")
+  
+  # Reuse your proxy_edit handlers for _modal tables:
+  observeEvent(input$missions_dt_modal_cell_edit,     { proxy_edit("missions",     input$missions_dt_modal_cell_edit) })
+  observeEvent(input$transects_dt_modal_cell_edit,    { proxy_edit("transects",    input$transects_dt_modal_cell_edit) })
+  observeEvent(input$observations_dt_modal_cell_edit, { proxy_edit("observations", input$observations_dt_modal_cell_edit) })
+  
+  observeEvent(input$mission_filter_modal, {
+    rv_hi$missions <- rv_hi$transects <- rv_hi$observations <- integer(0)
+  }, ignoreInit = TRUE)
+  
+  observeEvent(input$qc_table_rows_selected, {
+    sel <- input$qc_table_rows_selected
+    df  <- rv_qc_df()
+    if (!length(sel) || is.null(df)) return()
+    
+    clicked <- df[sel[1], , drop = FALSE]
+    
+    # Try to infer 'mission' from common column names
+    nms <- tolower(names(clicked))
+    mission_col <- intersect(nms, c("mission", "mission_id", "id_mission"))
+    mission_val <- if (length(mission_col)) as.character(clicked[[ mission_col[1] ]]) else NULL
+    
+    if (isTruthy(mission_val)) {
+      # Update the panel mission filter (if ACCDB is loaded)
+      if (!is.null(rv$missions)) {
+        choices <- sort(unique(as.character(rv$missions$mission)))
+        updateSelectInput(session, "mission_filter_modal",
+                          choices = choices,
+                          selected = if (mission_val %in% choices) mission_val else choices[1])
+      }
+      # Compute highlight indices on filtered edit dfs
+      if (!is.null(rv$missions_edit)) {
+        rv_hi$missions <- which(as.character(rv$missions_edit$mission) == mission_val)
+      }
+      if (!is.null(rv$transects_edit)) {
+        rv_hi$transects <- which(as.character(rv$transects_edit$mission) == mission_val)
+      }
+      if (!is.null(rv$observations_edit)) {
+        rv_hi$observations <- which(as.character(rv$observations_edit$mission) == mission_val)
+      }
+      append_log("[viewer->editor] mission='", mission_val, "'; hi rows — M:", length(rv_hi$missions),
+                 " T:", length(rv_hi$transects), " O:", length(rv_hi$observations))
+    } else {
+      rv_hi$missions <- rv_hi$transects <- rv_hi$observations <- integer(0)
+      append_log("[viewer->editor] No mission column found in clicked row; highlights cleared.")
+    }
+  })
+  
+  # (Legacy sidebar editor pieces kept for compatibility; safe to remove later)
   observe({
     req(input$mission_filter, rv$missions, rv$transects, rv$observations)
     rv$missions_edit     <- rv$missions     %>% filter(.data$mission == input$mission_filter)
@@ -580,7 +956,7 @@ server <- function(input, output, session) {
   observeEvent(input$transects_dt_cell_edit,    { proxy_edit("transects",    input$transects_dt_cell_edit) })
   observeEvent(input$observations_dt_cell_edit, { proxy_edit("observations", input$observations_dt_cell_edit) })
   
-  # Save edits to COPY
+  # --- Helpers (only define once in your server) ---
   sql_literal <- function(x) {
     if (is.na(x)) return("NULL")
     if (inherits(x, "Date")) return(paste0("#", format(x, "%Y-%m-%d"), "#"))
@@ -594,15 +970,18 @@ server <- function(input, output, session) {
            " WHERE ", paste(where_clauses, collapse = " AND "), ";")
   }
   
-  observeEvent(input$save_edits, {
-    req(length(rv$changes) > 0)
-    ap <- input$accdb_path; cp <- input$accdb_copy
-    req(isTruthy(ap), file.exists(ap))
-    req(isTruthy(cp))
+  # Save edits from floating panel
+  observeEvent(input$save_edits_modal, {
+    ap <- input$accdb_path_modal %||% input$accdb_path
+    cp <- input$accdb_copy_modal
+    
+    req(length(rv$changes) > 0, isTruthy(ap), file.exists(ap), isTruthy(cp))
     
     ok_copy <- try(file.copy(ap, cp, overwrite = TRUE), silent = TRUE)
     if (!isTRUE(ok_copy)) {
-      showNotification("Could not create the copy of the ACCDB.", type="error"); return()
+      showNotification("Could not create the copy of the ACCDB.", type="error")
+      append_log("[save][ERROR] Copy failed: ", ap, " -> ", cp)
+      return()
     }
     
     con <- try(RODBC::odbcConnectAccess2007(cp, believeNRows = FALSE), silent = TRUE)
@@ -610,22 +989,30 @@ server <- function(input, output, session) {
       conn_str <- paste0("Driver={Microsoft Access Driver (*.mdb, *.accdb)};", "DBQ=", cp, ";Uid=;Pwd=;")
       con <- try(RODBC::odbcDriverConnect(conn_str), silent = TRUE)
       if (inherits(con, "try-error") || is.null(con) || isTRUE(con < 0)) {
-        showNotification("ODBC open failed on COPY.", type="error"); return()
+        showNotification("ODBC open failed on COPY.", type="error")
+        append_log("[save][ERROR] ODBC open failed on COPY: ", cp)
+        return()
       }
     }
     on.exit(RODBC::odbcClose(con), add = TRUE)
     
-    n_applied <- 0L
+    n_applied <- 0L; n_failed <- 0L
     for (chg in rv$changes) {
-      tbl <- chg$table
       set_vals <- setNames(list(chg$new), chg$column)
-      sql <- build_update_sql(tbl, key_vals = chg$keys, set_vals = set_vals)
+      sql <- build_update_sql(chg$table, key_vals = chg$keys, set_vals = set_vals)
       status <- try(RODBC::sqlQuery(con, sql, errors = TRUE), silent = TRUE)
       if (!inherits(status, "try-error") && is.null(status)) n_applied <- n_applied + 1L
-      else append_log("[save][WARN] failed SQL: ", sql)
+      else { n_failed <- n_failed + 1L; append_log("[save][WARN] failed SQL: ", sql) }
     }
-    showNotification(paste0("Applied ", n_applied, " change(s) to: ", cp), type="message")
-    append_log("[save] Applied ", n_applied, " change(s) to: ", cp)
+    
+    showNotification(paste0("Applied ", n_applied, " change(s)",
+                            if (n_failed) paste0(" (", n_failed, " failed)") else "",
+                            " to: ", cp),
+                     type = if (n_failed) "warning" else "message")
+    append_log("[save] Applied ", n_applied, " change(s)",
+               if (n_failed) paste0(" (", n_failed, " failed)") else "", " to: ", cp)
+    
+    rv$changes <- list()
   })
   
   # ========== External process runner (Loader/Profiler) ==========
