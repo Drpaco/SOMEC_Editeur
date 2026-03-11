@@ -8,6 +8,11 @@ library(xml2)
 library(base64enc)
 library(tools)
 library(dplyr)
+#----from profiler
+library(tidyverse)
+library(lubridate)
+library(janitor)
+library(ggplot2)
 
 ui <- fluidPage(
   
@@ -43,12 +48,41 @@ ui <- fluidPage(
     .editor-float-body {
       flex: 1 1 auto; overflow: auto; padding: 12px; background: #fafafa;
     }
+    
+    /* ---- Busy ribbon (top) ---- */
+.busy-ribbon {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 4px;
+  background: linear-gradient(90deg, #0ea5e9 0%, #38bdf8 50%, #0ea5e9 100%);
+  background-size: 200% 100%;
+  animation: ribbonSlide 1.2s linear infinite;
+  display: none;
+  z-index: 4000;
+}
+@keyframes ribbonSlide {
+  0%   { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+/* Show while Shiny is busy */
+.shiny-busy .busy-ribbon { display: block; }
 
     /* Layer and visibility control */
     .editor-float.front  { z-index: 2050; }           /* above app */
     .editor-float.behind { z-index: 10;   }           /* behind app (not used if hidden) */
     .editor-float.hidden { display: none !important; }/* completely hidden */
-  ")),
+  "),
+tags$style(HTML("
+/* Viewer-only ribbon (shown while QC table/plot compute) */
+.viewer-busy-ribbon {
+  height: 4px;
+  background: linear-gradient(90deg, #0ea5e9 0%, #38bdf8 50%, #0ea5e9 100%);
+  background-size: 200% 100%;
+  animation: ribbonSlide 1.0s linear infinite;
+  margin: -6px 0 8px 0;
+  border-radius: 2px;
+}
+"))),
     
     # Global hide/show: outside click -> hide; open button -> show; Esc -> hide
     tags$script(HTML("
@@ -88,18 +122,32 @@ ui <- fluidPage(
   # ---------- End: Floating Editor HEAD ----------
   
   titlePanel("SOMEC — Probe + Loader/Profiler + QC Viewer + Data Editor"),
-  
   sidebarLayout(
     sidebarPanel(
       # --- Loader / Profiler controls (unchanged) ---
       h4("Loader / Profiler"),
       textInput("loader_path",   "Loader file (.R):",   value = ""),
       textInput("profiler_path", "Profiler file (.R):", value = ""),
-      textInput("accdb_path",    "Access DB (.accdb):", value = ""),  # used by Editor + child runners
+      
+      textInput(
+        "accdb_path", "Access DB (.accdb):",
+        value = "C:/Users/BolducF/Documents/ShinyApps/SOMEC/BaseDeDonnees/SOMEC_20251106.accdb",  # use forward slashes
+        width = "100%"
+      ),
       fluidRow(
         column(6, actionButton("run_loader",   "Run Loader")),
         column(6, actionButton("run_profiler", "Run Profiler"))
       ),
+      tags$hr(),
+      h4("Catalog map for Viewer"),
+      
+      textInput(
+        "relcatalog_xlsx", "RelCatalog (.xlsx):",
+        value = "C:/Users/BolducF/Documents/ShinyApps/SOMEC/GestionDeDonnees/RelCatalog.xlsx",
+        width = "100%"
+      ),
+      textInput("relcatalog_sheet", "Sheet:", value = "RelCatalog", width = "100%"),
+      actionButton("load_relcatalog", "Load catalog map"),
       tags$hr()
     ),
     
@@ -119,40 +167,36 @@ ui <- fluidPage(
         tabPanel(
           "QC Viewer",
           fluidRow(
-            # ---- LEFT: All report / viewer menus ----
+            # ---- LEFT: Live viewer menus (Access -> Mission -> Sheet -> Variable) ----
             column(
               width = 3,
-              h4("Reports"),
-              textInput("parent", "Reports parent folder:",
-                        value = "C:/Users/BolducF/Documents/ShinyApps/SOMEC/GestionDeDonnees",
-                        width = "100%"),
-              actionButton("refresh", "Refresh list"),
-              tags$hr(),
-              selectInput("folder", "Reports folder:", choices = character(0)),
-              selectInput("file",   "Report file (.xlsx):", choices = character(0)),
-              tags$hr(),
               h4("Viewer"),
-              selectInput("sheet", "Sheet:", choices = character(0)),
-              conditionalPanel(
-                condition = "['transects','observations'].includes((input.sheet || '').toLowerCase())",
-                selectInput("var_picker", "Variable:", choices = character(0))
+              tags$small("Uses the Access DB path from the left sidebar."),
+              tags$br(),
+              selectInput("mission_select", "Mission:", choices = character(0), width = "100%"),
+              selectInput(
+                "sheet",
+                "Sheet:",
+                choices = c("Missions", "Transects", "Observations"),
+                selected = "Transects",
+                width = "100%"
               ),
-              tags$hr(),
-              actionButton("debug_dump", "Debug dump")
+              selectInput("var_picker", "Variable:", choices = character(0), width = "100%")
             ),
             
-            # ---- MIDDLE: Status, Table, Images ----
+            # ---- MIDDLE: Status, Table, Histogram ----
             column(
               width = 5,
               h4("Status"),
               textOutput("qc_status"),
+              uiOutput("viewer_busy_ribbon"),
               tags$hr(),
               h4("QC table"),
               div(textOutput("var_label"), style = "margin: -6px 0 8px 0; color:#555;"),
               DTOutput("qc_table"),
               tags$hr(),
-              h4("Embedded images"),
-              uiOutput("img_gallery"),
+              h4("Histogram"),
+              plotOutput("prof_hist", height = "260px"),
               tags$hr(),
               actionButton("open_editor", "Open editor (pop‑out)")
             )
@@ -170,14 +214,50 @@ ui <- fluidPage(
 )
 
 server <- function(input, output, session) {
-  # --- simple in-app console ---
+  
   log <- reactiveVal("")
+  # replace your current append_log() with this version
   append_log <- function(...) {
     line <- paste(format(Sys.time(), "%H:%M:%S"), paste(..., collapse = " "), sep = "  ")
-    cur  <- log()
+    # Read without creating a reactive dependency
+    cur  <- isolate(log())
+    # Update the reactiveVal (setter is allowed)
     log(paste0(cur, if (nzchar(cur)) "\n" else "", line))
   }
-  output$log <- renderText({ invalidateLater(500, session); log() })
+  
+  
+  output$log <- renderText({
+    invalidateLater(700, session)
+    log()
+  })
+  
+  # --- viewer busy flag + ribbon ---
+  viewer_busy <- reactiveVal(FALSE)
+  
+  output$viewer_busy_ribbon <- renderUI({
+    if (!isTRUE(viewer_busy())) return(NULL)
+    div(class = "viewer-busy-ribbon")
+  })
+  
+  # --- DEBUG BEACONS (remove when done) ---
+  options(shiny.fullstacktrace = TRUE)
+  
+  # Fires once when the server function is constructed
+  append_log("[init] server() entered")
+  
+  # Fires when the UI has connected (after the first flush)
+  session$onFlushed(function() {
+    append_log("[init] session UI bound; token=", as.character(session$token))
+  }, once = TRUE)
+  showNotification("SOMEC app ready.", type = "message", duration = 3)
+  
+
+  
+  # --- DEBUG: proof that the RelCatalog button click is delivered ---
+  observeEvent(input$load_relcatalog, {
+    append_log("[catalog][probe] button click received (quick toast)")
+    showNotification("RelCatalog button: click received", type = "message")
+  }, ignoreInit = TRUE, priority = 1000)
   
   # --- utils ---
   `%||%` <- function(x, y) if (is.null(x)) y else x
@@ -189,251 +269,564 @@ server <- function(input, output, session) {
     tolower(s) %in% c("transects","observations")
   }
   
+  catalog_allowed_for <- function(mp, table_name, col) {
+    if (!is.list(mp) || !length(mp)) return(NULL)
+    key <- paste0(tolower(table_name), "$", tolower(col))
+    if (!key %in% names(mp)) { append_log("[catalog] no map for key: ", key); return(NULL) }
+    append_log("[catalog] map HIT for key: ", key)
+    mp[[key]]
+  }
+  
+  # pick a column by case-insensitive candidates; returns the *real* column name or NULL
+  pick_colname_ci <- function(df, candidates) {
+    nms <- names(df); low <- tolower(nms)
+    for (cand in tolower(candidates)) {
+      hit <- which(low == cand)
+      if (length(hit)) return(nms[hit[1]])
+    }
+    NULL
+  }
+  filter_by_mission_ci <- function(df, mission_value) {
+    if (!is.data.frame(df) || !nzchar(mission_value)) return(df)
+    col <- pick_colname_ci(df, c("mission","mission_id","id_mission"))
+    if (is.null(col)) return(df)
+    df[df[[col]] == mission_value, , drop = FALSE]
+  }
+  
+  # ---- profiler-core helpers (local; no workbook writes) ----
+  is_comment_col <- function(nm) grepl("(comment|commentaire|note|remarque)", nm, ignore.case = TRUE)
+  is_dt <- function(x) inherits(x, "POSIXt") || inherits(x, "Date")
+  
+  clean_chr <- function(x) {
+    x <- as.character(x)
+    x <- trimws(x)
+    x[x == "" | x == "NA"] <- NA_character_
+    x
+  }
+  
+  freq_table <- function(x) {
+    tibble::tibble(value = as.character(x)) |>
+      dplyr::mutate(value = dplyr::if_else(is.na(value) | value == "NA", NA_character_, value)) |>
+      dplyr::count(value, sort = TRUE, name = "n") |>
+      dplyr::mutate(pct = round(100 * n / sum(n, na.rm = TRUE), 2))
+  }
+  
+  plot_hist <- function(x, title="", xlab="") {
+    df <- tibble::tibble(x = suppressWarnings(as.numeric(x))) |>
+      dplyr::filter(is.finite(x))
+    if (!nrow(df)) return(NULL)
+    ggplot2::ggplot(df, ggplot2::aes(x)) +
+      ggplot2::geom_histogram(color="grey30", fill="#4C78A8", bins=30) +
+      ggplot2::labs(title=title, x=xlab, y="N") +
+      ggplot2::theme_minimal(base_size = 10)
+  }
+  plot_hour_hist <- function(dt, title="") {
+    v <- suppressWarnings(lubridate::as_datetime(dt))
+    if (all(is.na(v))) return(NULL)
+    hh <- lubridate::hour(v)
+    ggplot2::ggplot(tibble::tibble(h=hh), ggplot2::aes(h)) +
+      ggplot2::geom_histogram(binwidth=1, boundary=0, color="grey30", fill="#59A14F") +
+      ggplot2::scale_x_continuous(breaks = 0:23) +
+      ggplot2::labs(title=title, x="Heure (0–23)", y="N") +
+      ggplot2::theme_minimal(base_size = 10)
+  }
+  
+  # Build a single-variable "block": returns list(type, table_df, plot)
+  prof_make_block <- function(df, col, table_name, mp = NULL, mis_start = NA, mis_end = NA) {
+    col_lc <- tolower(col)
+    x      <- df[[col]]
+    
+    # type hints
+    is_datetime <- is_dt(x)
+    is_charlike <- is.character(x) || is.factor(x)
+    
+    # catalog presence
+    has_catalog <- FALSE
+    if (is.list(mp)) {
+      key <- paste0(tolower(table_name), "$", tolower(col))
+      has_catalog <- !is.null(mp[[key]])
+    }
+    # forced categorical (like profiler)
+    forced_cat <- col_lc %in% c("mission", "cote_obs", "code_obs")
+    
+    # ---- DATETIME
+    if (is_datetime) {
+      tbl <- tibble::tibble(
+        n   = sum(!is.na(x)),
+        min = as.character(suppressWarnings(min(lubridate::as_datetime(x), na.rm = TRUE))),
+        max = as.character(suppressWarnings(max(lubridate::as_datetime(x), na.rm = TRUE)))
+      )
+      if (!any(is.na(c(mis_start, mis_end)))) {
+        dt <- suppressWarnings(lubridate::as_datetime(x))
+        tbl$`n_outside_mission` <- sum(dt < mis_start | dt > mis_end, na.rm = TRUE)
+      }
+      p <- plot_hour_hist(x, title = paste0(col, " — heure"))
+      return(list(type="datetime", table_df = tbl, plot = p))
+    }
+    
+    # ---- CATEGORICAL when:
+    #   - character/factor
+    #   - OR has explicit catalog
+    #   - OR forced by name
+    #   - OR (fallback) numeric with small cardinality (<= 25)
+    small_cardinality <- is.numeric(x) && length(unique(stats::na.omit(x))) <= 25
+    allowed <- catalog_allowed_for(mp, table_name, col)
+    has_catalog <- !is.null(allowed)
+    
+    if (is_charlike || has_catalog || forced_cat || small_cardinality) {
+      ft <- freq_table(x)
+      ft$rare <- ft$pct < (100 * RARE_PCT)
+      
+      if (has_catalog) {
+        ft$`found in the catalog` <- ft$value %in% allowed
+        ft <- ft[, c("value", "n", "pct", "rare", "found in the catalog")]
+      } else {
+        ft <- ft[, c("value", "n", "pct", "rare")]
+      }
+      
+      
+      p <- if (nrow(ft)) ggplot2::ggplot(ft, ggplot2::aes(x = reorder(value, -n), y = n)) +
+        ggplot2::geom_col(fill="#F28E2B") + ggplot2::coord_flip() +
+        ggplot2::labs(title = paste0(col, " — fréquences"), x = NULL, y = "N") +
+        ggplot2::theme_minimal(base_size = 10) else NULL
+      
+      return(list(type="categorical", table_df = ft, plot = p))
+    }
+    
+    # ---- NUMERIC (fallback)
+    x_num <- suppressWarnings(as.numeric(x))
+    tbl <- tibble::tibble(n = sum(!is.na(x_num)), n_missing = sum(is.na(x_num)))
+    p <- if (tbl$n[1] > 0) plot_hist(x_num, title = col, xlab = col) else NULL
+    list(type="numeric", table_df = tbl, plot = p)
+    }
+  
+  
+  fetch_missions <- function(ap) {
+    if (!isTruthy(ap) || !file.exists(ap)) return(character(0))
+    con <- try(RODBC::odbcConnectAccess2007(ap, believeNRows = FALSE), silent = TRUE)
+    if (inherits(con, "try-error") || is.null(con) || isTRUE(con < 0)) {
+      conn_str <- paste0("Driver={Microsoft Access Driver (*.mdb, *.accdb)};", "DBQ=", ap, ";Uid=;Pwd=;")
+      con <- try(RODBC::odbcDriverConnect(conn_str), silent = TRUE)
+    }
+    if (inherits(con, "try-error") || is.null(con) || isTRUE(con < 0)) return(character(0))
+    on.exit(RODBC::odbcClose(con), add = TRUE)
+    
+    ms <- tryCatch(RODBC::sqlFetch(con, "missions"), error = function(e) NULL)
+    if (!is.data.frame(ms) || !"mission" %in% names(ms)) return(character(0))
+    sort(unique(as.character(ms$mission)))
+  }
+  
+  observeEvent(input$accdb_path, {
+    m <- fetch_missions(input$accdb_path)
+    updateSelectInput(session, "mission_select",
+                      choices = m,
+                      selected = if (length(m)) m[1] else character(0))
+  }, ignoreInit = FALSE)
+  
+  # Read current sheet for selected mission (live from Access)
+  prof_sheet_df <- reactive({
+    req(isTruthy(input$accdb_path), file.exists(input$accdb_path))
+    mis <- input$mission_select; req(isTruthy(mis))
+    sh  <- input$sheet;          req(isTruthy(sh))
+    sh_l <- tolower(sh)  # "missions", "transects", or "observations"
+    
+    con <- try(RODBC::odbcConnectAccess2007(input$accdb_path, believeNRows = FALSE), silent = TRUE)
+    if (inherits(con, "try-error") || is.null(con) || isTRUE(con < 0)) {
+      conn_str <- paste0("Driver={Microsoft Access Driver (*.mdb, *.accdb)};", "DBQ=", input$accdb_path, ";Uid=;Pwd=;")
+      con <- try(RODBC::odbcDriverConnect(conn_str), silent = TRUE)
+    }
+    validate(need(!inherits(con, "try-error") && !is.null(con) && !isTRUE(con < 0),
+                  "Cannot open ODBC channel to ACCDB (for live profiler)."))
+    on.exit(RODBC::odbcClose(con), add = TRUE)
+    
+    # Missions row for bounds
+    ms <- tryCatch(RODBC::sqlFetch(con, "missions"), error = function(e) NULL)
+    validate(need(is.data.frame(ms), "Cannot read 'missions' table."))
+    mis_row <- ms %>% dplyr::filter(.data$mission == !!mis) %>% dplyr::slice_head(n = 1)
+    
+    # Load requested table
+    # NOTE: QC_Summary may not exist in Access; this will show a clear message if not found.
+    df <- tryCatch(RODBC::sqlFetch(con, sh_l), error = function(e) NULL)
+    validate(need(is.data.frame(df), paste("Cannot read table from Access:", sh_l)))
+    
+    # Filter by mission (case-insensitive)
+    n_before <- nrow(df)
+    if (identical(sh_l, "missions")) {
+      df <- filter_by_mission_ci(ms, mis)   # show only the selected mission row
+    } else {
+      df <- filter_by_mission_ci(df, mis)
+    }
+    
+    append_log("[viewer] table=", sh_l, " mission=", mis, " rows: before=", n_before, " after=", nrow(df))    
+    
+    list(
+      df = df,
+      table_name = sh_l,
+      mis_start = suppressWarnings(lubridate::as_datetime(mis_row$debut)),
+      mis_end   = suppressWarnings(lubridate::as_datetime(mis_row$fin))
+    )
+  })
+  
+  observeEvent(prof_sheet_df(), {
+    blk <- prof_sheet_df(); if (is.null(blk)) return()
+    # Only expose variables for Transects/Observations (variable view)
+    if (supports_variable_view(input$sheet)) {
+      cols <- names(blk$df)
+      # Optional: drop obvious technical columns
+      # cols <- setdiff(cols, c("id", "id_transect", "id_obs"))
+      updateSelectInput(session, "var_picker",
+                        choices = cols,
+                        selected = if (length(cols)) cols[1] else character(0))
+    } else {
+      updateSelectInput(session, "var_picker", choices = character(0), selected = character(0))
+    }
+  }, ignoreInit = TRUE)
+  
+  
+  # ---- profiler config ----
+  RARE_PCT <- 0.10  # 10%
+  
+  # ---- value-list RelCatalog (table/column/value variants, FR/EN) ----
+  build_catalog_map_from_df <- function(rc_df) {
+    stopifnot(is.data.frame(rc_df))
+    nms <- tolower(names(rc_df)); names(rc_df) <- nms
+    pick1 <- function(cands) { hit <- intersect(cands, nms); if (length(hit)) hit[1] else NA_character_ }
+    
+    tcol <- pick1(c("table","data_table","tbl","table_name","source_table","feuille","sheet"))
+    ccol <- pick1(c("column","data_column","col","field","champ","variable"))
+    vcol_code  <- pick1(c("code","val","valeur","catalogue","catalog_value","valeur_catalogue"))
+    vcol_value <- pick1(c("value","allowed","level"))
+    vcol_label <- pick1(c("label","libelle","libellé"))
+    vcol <- if (!is.na(vcol_code)) vcol_code else if (!is.na(vcol_value)) vcol_value else vcol_label
+    
+    if (any(is.na(c(tcol, ccol, vcol)))) return(NULL)
+    
+    rc <- rc_df[, c(tcol, ccol, vcol)]
+    names(rc) <- c("table","column","value")
+    rc[] <- lapply(rc, function(v) trimws(as.character(v)))
+    rc <- rc[ nzchar(rc$table) & nzchar(rc$column) & nzchar(rc$value), , drop = FALSE]
+    if (!nrow(rc)) return(NULL)
+    
+    keys <- paste0(tolower(rc$table), "$", tolower(rc$column))
+    mp <- lapply(split(as.character(rc$value), keys, drop = TRUE), function(v) unique(v[nzchar(v)]))
+    attr(mp, "matched_columns") <- list(mode="value_list", table=tcol, column=ccol, value=vcol)
+    mp
+  }
+  
+  # ---------- Build map from relationship-style RelCatalog ----------
+  # Expects headers: Object | ColumnName | RefObject | RefColumn (case-insensitive)
+  build_catalog_map_from_relationships <- function(rc_df, accdb_path, progress = NULL) {
+    stopifnot(is.data.frame(rc_df))
+    
+    # normalize headers
+    nms <- tolower(names(rc_df)); names(rc_df) <- nms
+    need <- c("object","columnname","refobject","refcolumn")
+    if (!all(need %in% nms)) return(NULL)
+    
+    rc <- rc_df[, need]
+    names(rc) <- c("object","column","refobject","refcolumn")
+    rc[] <- lapply(rc, function(v) trimws(as.character(v)))
+    rc <- unique(rc[Reduce(`&`, lapply(rc, nzchar)), , drop = FALSE])
+    if (!nrow(rc)) return(NULL)
+    
+    con <- open_access_con(accdb_path)
+    if (is.null(con)) return(NULL)
+    on.exit(RODBC::odbcClose(con), add = TRUE)
+    
+    # Pre-scan table names once to avoid expensive sqlTables() calls in the loop
+    tdf <- try(RODBC::sqlTables(con), silent = TRUE)
+    if (inherits(tdf, "try-error") || is.null(tdf)) return(NULL)
+    tnames <- unique(as.character(tdf$TABLE_NAME))
+    tmap <- setNames(tnames, tolower(tnames))   # lower -> real
+    
+    # cache per RefObject
+    robjs <- sort(unique(tolower(rc$refobject)))
+    cache <- vector("list", length(robjs)); names(cache) <- robjs
+    
+    # progress by unique RefObject
+    n <- length(robjs); k <- 0L
+    for (ro in robjs) {
+      k <- k + 1L
+      if (!is.null(progress)) progress$set(value = k / max(1, n),
+                                           message = sprintf("Catalog: %s (%d/%d)", ro, k, n))
+      df <- sql_fetch_ci(con, ro, tmap = tmap)
+      cache[[ro]] <- df
+    }
+    
+    # build the map
+    mp <- list()
+    for (i in seq_len(nrow(rc))) {
+      obj  <- rc$object[i]
+      col  <- rc$column[i]
+      robj <- tolower(rc$refobject[i])
+      rcol <- rc$refcolumn[i]
+      
+      df <- cache[[robj]]
+      if (is.null(df)) next
+      vec <- pick_col_ci(df, rcol)
+      if (is.null(vec)) next
+      
+      key  <- paste0(tolower(obj), "$", tolower(col))
+      vals <- unique(as.character(vec)); vals <- vals[nzchar(vals)]
+      if (!length(vals)) next
+      
+      if (is.null(mp[[key]])) mp[[key]] <- vals else mp[[key]] <- unique(c(mp[[key]], vals))
+    }
+    
+    attr(mp, "matched_columns") <- list(mode = "relationships",
+                                        object = "Object", column = "ColumnName",
+                                        ref_object = "RefObject", ref_column = "RefColumn")
+    mp
+  }
+  
+  
+  output$prof_hist <- renderPlot({
+    req(supports_variable_view(input$sheet))
+    viewer_busy(TRUE); on.exit(viewer_busy(FALSE), add = TRUE)
+    
+    withProgress(message = "Drawing histogram...", value = 0, {
+      blk <- prof_sheet_df(); req(!is.null(blk)); incProgress(0.3)
+      v   <- input$var_picker; req(isTruthy(v))
+      df  <- blk$df
+      validate(need(v %in% names(df), sprintf("Column '%s' not in %s.", v, blk$table_name)))
+      mp  <- prof_map(); incProgress(0.6)
+      
+      one <- prof_make_block(df, v, blk$table_name, mp = mp,
+                             mis_start = blk$mis_start, mis_end = blk$mis_end)
+      
+      incProgress(0.9)
+      if (is.null(one$plot)) { plot.new(); title(main = sprintf("No data to plot for '%s'", v)) }
+      else print(one$plot)
+    })
+  })
+  
+  
   # --- Data containers for Editor ---
   rv <- reactiveValues(
     missions = NULL, transects = NULL, observations = NULL,
     missions_edit = NULL, transects_edit = NULL, observations_edit = NULL,
     changes = list()
   )
-  
-  # --- Probe scanner (unchanged logic) ---
-  scan_reports <- function(parent) {
-    parent <- tryCatch(normalizePath(parent, winslash = "/", mustWork = FALSE), error = function(e) parent)
-    append_log("[scan] parent=", parent, " exists=", dir.exists(parent))
-    
-    subs <- if (dir.exists(parent)) list.dirs(parent, full.names = TRUE, recursive = FALSE) else character(0)
-    mrs  <- subs[grepl("MissionReports_[0-9]{8}$", basename(subs), perl = TRUE)]
-    append_log("[scan] MR folders: ", length(mrs),
-               if (length(mrs)) paste0(" [", paste(basename(mrs), collapse = ", "), "]") else "")
-    list(parent = parent, mrs = mrs)
-  }
-  observeEvent(TRUE, { append_log("[init] app started") }, once = TRUE, ignoreInit = FALSE)
-  
-  observeEvent(list(input$parent, input$refresh), {
-    r <- scan_reports(input$parent)
-    if (!length(r$mrs)) {
-      updateSelectInput(session, "folder", choices = character(0))
-      updateSelectInput(session, "file",   choices = character(0))
-      updateSelectInput(session, "sheet",  choices = character(0))
-      updateSelectInput(session, "var_picker", choices = character(0))
-      append_log("[scan] no MissionReports_*")
-      return()
-    }
-    # newest first
-    pick <- r$mrs[order(basename(r$mrs), decreasing = TRUE)]
-    updateSelectInput(session, "folder", choices = setNames(pick, basename(pick)), selected = pick[1])
-    
-    files <- list.files(pick[1], pattern = "\\.xlsx$", full.names = TRUE, ignore.case = TRUE)
-    files <- tryCatch(normalizePath(files, winslash = "/", mustWork = FALSE), error = function(e) files)
-    append_log("[scan] .xlsx in ", basename(pick[1]), ": ", length(files),
-               if (length(files)) paste0(" [", paste(basename(head(files, 8)), collapse = ", "),
-                                         if (length(files) > 8) ", ..." else "", "]") else "")
-    updateSelectInput(session, "file",
-                      choices  = setNames(files, basename(files)),
-                      selected = if (length(files)) files[1] else character(0))
-  }, ignoreInit = FALSE)
-  
-  observeEvent(input$file, {
-    f <- input$file
-    if (!isTruthy(f) || !file.exists(f)) {
-      updateSelectInput(session, "sheet",      choices = character(0))
-      updateSelectInput(session, "var_picker", choices = character(0))
-      output$sheets <- renderText("<none>")
-      append_log("[ui] invalid file")
-      return()
-    }
-    f <- normalize_path(f)
-    sh <- tryCatch(openxlsx::getSheetNames(f), error = function(e) NULL)
-    output$sheets <- renderText(if (length(sh)) paste(sh, collapse = ", ") else "<error/null>")
-    append_log("[workbook] sheets: ", if (length(sh)) paste(sh, collapse = ", ") else "<error/null>")
-    
-    if (!length(sh)) {
-      updateSelectInput(session, "sheet",      choices = character(0))
-      updateSelectInput(session, "var_picker", choices = character(0))
-      return()
-    }
-    
-    low <- tolower(sh)
-    pick_first <- function(cand) { hit <- which(low == cand); if (length(hit)) sh[hit[1]] else NA_character_ }
-    pref <- c(pick_first("transects"), pick_first("observations"),
-              pick_first("qc_summary"), pick_first("missions"),
-              pick_first("index"), sh[1])
-    pref <- pref[!is.na(pref)][1]
-    
-    updateSelectInput(session, "sheet", choices = sh, selected = pref)
-    append_log("[ui] sheet selected: ", pref)
-  }, ignoreInit = TRUE)
-  
-  # ---------- Viewer: Status / Variables / Table / Images ----------
-  output$qc_status <- renderText({
-    f <- input$file
-    if (!isTruthy(f)) return("Selected: <none>")
-    f <- normalize_path(f)
-    paste0("Selected: ", f, if (file.exists(f)) " (exists)" else " (not found)")
-  })
-  
-  detect_variable_titles <- function(xlsx, sheet_name) {
-    raw <- tryCatch(openxlsx::read.xlsx(xlsx, sheet = sheet_name, colNames = FALSE,
-                                        detectDates = FALSE, skipEmptyRows = FALSE, skipEmptyCols = FALSE),
-                    error = function(e) NULL)
-    if (is.null(raw) || !nrow(raw)) return(data.frame(var = character(0), row_start = integer(0)))
-    titles <- list()
-    for (r in seq_len(nrow(raw))) {
-      row_vals <- raw[r, , drop = TRUE]
-      hit <- which(vapply(as.character(row_vals), function(cell) {
-        if (is.na(cell)) return(FALSE)
-        grepl("^\\s*[•\\-]\\s*.+\\(", cell)   # bullet or dash + "name ("
-      }, logical(1)))
-      if (length(hit)) {
-        first_cell <- as.character(row_vals[hit[1]])
-        v <- sub("^\\s*[•\\-]\\s*", "", first_cell)
-        v <- sub("\\s*\\(.*$", "", v)
-        v <- trimws(v)
-        if (nzchar(v)) titles[[length(titles) + 1L]] <- data.frame(var = v, row_start = r)
-      }
-    }
-    if (!length(titles)) return(data.frame(var = character(0), row_start = integer(0)))
-    do.call(rbind, titles)
-  }
-  
-  sheet_index_of <- function(file, sheet_name) {
-    sn <- tryCatch(openxlsx::getSheetNames(file), error = function(e) NULL)
-    if (is.null(sn)) return(NA_integer_)
-    hit <- which(sn == sheet_name)
-    if (length(hit)) hit[1] else NA_integer_
-  }
-  
-  extract_images_with_anchors <- function(xlsx, sheet_idx) {
-    out <- data.frame(img_path = character(0), row = integer(0), col = integer(0), stringsAsFactors = FALSE)
-    if (is.na(sheet_idx) || sheet_idx <= 0) return(out)
-    tmpdir <- tempfile("unz_"); dir.create(tmpdir, showWarnings = FALSE, recursive = TRUE)
-    utils::unzip(xlsx, exdir = tmpdir)
-    
-    sheet_rels <- file.path(tmpdir, "xl", "worksheets", "_rels", sprintf("sheet%d.xml.rels", sheet_idx))
-    if (!file.exists(sheet_rels)) return(out)
-    
-    rels <- tryCatch(xml2::read_xml(sheet_rels), error = function(e) NULL); if (is.null(rels)) return(out)
-    rel_nodes <- xml2::xml_find_all(rels, ".//*[local-name()='Relationship']")
-    if (!length(rel_nodes)) return(out)
-    rType   <- xml2::xml_attr(rel_nodes, "Type")
-    rTarget <- xml2::xml_attr(rel_nodes, "Target")
-    draw_targets <- rTarget[
-      grepl("officeDocument/2006/relationships/drawing", rType, fixed = TRUE) |
-        grepl("drawings/", rTarget, fixed = TRUE)
-    ]
-    if (!length(draw_targets)) return(out)
-    
-    all_rows <- list()
-    for (t in draw_targets) {
-      drawing_xml <- normalizePath(file.path(dirname(sheet_rels), "..", sub("^.*/", "", t)),
-                                   winslash = "/", mustWork = FALSE)
-      if (!grepl("xl/drawings/", drawing_xml, fixed = TRUE)) {
-        maybe <- normalizePath(file.path(dirname(dirname(sheet_rels)), "drawings", basename(drawing_xml)),
-                               winslash = "/", mustWork = FALSE)
-        if (file.exists(maybe)) drawing_xml <- maybe
-      }
-      drawing_rels_xml <- sub("xl/drawings/drawing([0-9]+)\\.xml$",
-                              "xl/drawings/_rels/drawing\\1.xml.rels", drawing_xml)
-      if (!file.exists(drawing_rels_xml)) next
-      
-      d_rels <- tryCatch(xml2::read_xml(drawing_rels_xml), error = function(e) NULL); if (is.null(d_rels)) next
-      d_nodes <- xml2::xml_find_all(d_rels, ".//*[local-name()='Relationship']")
-      d_rId   <- xml2::xml_attr(d_nodes, "Id")
-      d_tgt   <- xml2::xml_attr(d_nodes, "Target")
-      id_to_img <- setNames(
-        vapply(d_tgt, function(it) {
-          imgp <- normalizePath(file.path(dirname(drawing_rels_xml), "..", it),
-                                winslash = "/", mustWork = FALSE)
-          if (!grepl("xl/media/", imgp, fixed = TRUE)) {
-            maybe <- normalizePath(file.path(dirname(dirname(drawing_rels_xml)), "media", basename(imgp)),
-                                   winslash = "/", mustWork = FALSE)
-            if (file.exists(maybe)) imgp <- maybe
-          }
-          imgp
-        }, character(1)),
-        d_rId
-      )
-      
-      dxml <- tryCatch(xml2::read_xml(drawing_xml), error = function(e) NULL); if (is.null(dxml)) next
-      anchors <- c(xml2::xml_find_all(dxml, ".//*[local-name()='twoCellAnchor']"),
-                   xml2::xml_find_all(dxml, ".//*[local-name()='oneCellAnchor']"))
-      if (!length(anchors)) next
-      
-      for (a in anchors) {
-        fromNode <- xml2::xml_find_first(a, ".//*[local-name()='from']")
-        r <- suppressWarnings(as.integer(xml2::xml_text(xml2::xml_find_first(fromNode, ".//*[local-name()='row']"))))
-        c <- suppressWarnings(as.integer(xml2::xml_text(xml2::xml_find_first(fromNode, ".//*[local-name()='col']"))))
-        r <- if (is.na(r)) NA_integer_ else r + 1L
-        c <- if (is.na(c)) NA_integer_ else c + 1L
-        
-        blip <- xml2::xml_find_first(a, ".//*[local-name()='blip']")
-        rid  <- xml2::xml_attr(blip, "r:embed"); if (is.na(rid) || is.null(rid)) rid <- xml2::xml_attr(blip, "embed")
-        imgp <- if (!is.null(rid) && rid %in% names(id_to_img)) id_to_img[[rid]] else NA_character_
-        
-        if (!is.na(imgp) && file.exists(imgp) && !is.na(r) && !is.na(c)) {
-          all_rows[[length(all_rows) + 1L]] <- data.frame(img_path = imgp, row = r, col = c, stringsAsFactors = FALSE)
-        }
-      }
-    }
-    if (!length(all_rows)) return(out)
-    do.call(rbind, all_rows)
-  }
-  
-  extract_all_images <- function(xlsx) {
-    tmpdir <- tempfile("unz_"); dir.create(tmpdir, showWarnings = FALSE, recursive = TRUE)
-    utils::unzip(xlsx, exdir = tmpdir)
-    media_dir <- file.path(tmpdir, "xl", "media")
-    if (!dir.exists(media_dir)) return(character(0))
-    list.files(media_dir, full.names = TRUE)
-  }
-  
-  rv_img_index <- reactiveVal(NULL)
   rv_qc_df <- reactiveVal(NULL)
   
-  observeEvent(list(input$file, input$sheet), {
-    f <- input$file; s <- input$sheet
-    if (!isTruthy(f) || !file.exists(f) || !isTruthy(s)) {
-      rv_img_index(NULL); updateSelectInput(session, "var_picker", choices = character(0)); return()
+  # ---------- Viewer: Status ----------
+  output$qc_status <- renderText({
+    ap  <- input$accdb_path %||% "<none>"
+    mis <- input$mission_select %||% "<none>"
+    sh  <- input$sheet %||% "<none>"
+    paste0(
+      "ACCDB: ", if (isTruthy(ap) && file.exists(ap)) ap else "<none>",
+      "  | Mission: ", mis,
+      "  | Sheet: ", sh
+    )
+  })
+  
+  output$catalog_status <- renderText({
+    mp <- prof_map()
+    sprintf("Catalog map fields: %d", if (is.list(mp)) length(mp) else 0L)
+  })
+  
+  rv_map <- reactiveVal(NULL)
+  
+  prof_map <- reactive({
+    # 1) Explicit cache (preferred)
+    mp <- rv_map()
+    if (is.list(mp) && length(mp)) return(mp)
+    
+    # 2) Fallback to Loader's function if it exists (no button)
+    if (exists("build_catalog_map")) {
+      mp2 <- try(build_catalog_map(), silent = TRUE)
+      if (!inherits(mp2, "try-error") && is.list(mp2)) return(mp2)
     }
-    f <- normalize_path(f)
-    idx <- sheet_index_of(f, s); append_log("[images] sheet index: ", idx)
+    # 3) Empty map
+    list()
+  })
+  
+  # ---------- Robust Access helpers ----------
+  # ---------- Robust Access helpers ----------
+  open_access_con <- function(ap) {
+    con <- try(RODBC::odbcConnectAccess2007(ap, believeNRows = FALSE), silent = TRUE)
+    if (inherits(con, "try-error") || is.null(con) || isTRUE(con < 0)) {
+      conn_str <- paste0("Driver={Microsoft Access Driver (*.mdb, *.accdb)};", "DBQ=", ap, ";Uid=;Pwd=;")
+      con <- try(RODBC::odbcDriverConnect(conn_str), silent = TRUE)
+    }
+    if (inherits(con, "try-error") || is.null(con) || isTRUE(con < 0)) return(NULL)
+    con
+  }
+  
+  # Case-insensitive table fetch; also tries 'cat_' prefix
+  sql_fetch_ci <- function(con, tbl, tmap = NULL) {
+    # Use pre-scanned table map if provided
+    if (!is.null(tmap)) {
+      real <- tmap[[tolower(tbl)]]
+      if (!is.null(real)) return(tryCatch(RODBC::sqlFetch(con, real), error = function(e) NULL))
+      # try 'cat_' prefix
+      real <- tmap[[paste0("cat_", tolower(tbl))]]
+      if (!is.null(real)) return(tryCatch(RODBC::sqlFetch(con, real), error = function(e) NULL))
+      return(NULL)
+    }
+    all_tbls <- try(RODBC::sqlTables(con), silent = TRUE)
+    if (inherits(all_tbls, "try-error") || is.null(all_tbls)) return(NULL)
+    tnames <- unique(as.character(all_tbls$TABLE_NAME))
+    hit <- tnames[tolower(tnames) == tolower(tbl)]
+    if (!length(hit)) hit <- tnames[tolower(tnames) == paste0("cat_", tolower(tbl))]
+    if (!length(hit)) return(NULL)
+    tryCatch(RODBC::sqlFetch(con, hit[1]), error = function(e) NULL)
+  }
+  
+  # Case-insensitive column accessor
+  pick_col_ci <- function(df, col) {
+    if (!is.data.frame(df)) return(NULL)
+    hit <- which(tolower(names(df)) == tolower(col))
+    if (!length(hit)) return(NULL)
+    df[[ hit[1] ]]
+  }
+  
+  observeEvent(input$load_relcatalog, {
+    # --- Immediate visual feedback so you know the click is received ---
+    notif_id <- showNotification("Loading RelCatalog…", type = "message", duration = NULL, closeButton = TRUE)
+    on.exit({ try(removeNotification(notif_id), silent = TRUE) }, add = TRUE)
     
-    by_sheet <- tryCatch(extract_images_with_anchors(f, idx), error = function(e) NULL)
-    vars <- if (supports_variable_view(s)) detect_variable_titles(f, s) else data.frame(var=character(0), row_start=integer(0))
-    if (nrow(vars)) append_log("[vars] detected: ", paste(vars$var, collapse=" | "))
+    append_log("[catalog] load_relcatalog clicked")
     
-    if (is.null(by_sheet) || !nrow(by_sheet)) {
-      append_log("[images] no anchors; fallback to /xl/media")
-      imgs_all <- tryCatch(extract_all_images(f), error=function(e) character(0))
-      rv_img_index(list(
-        by_sheet = if (length(imgs_all)) data.frame(img_path = imgs_all, row = NA_integer_, col = NA_integer_) else data.frame(img_path=character(0),row=integer(0),col=integer(0)),
-        by_var   = data.frame(var=character(0), img_path=character(0), row=integer(0), col=integer(0)),
-        vars     = vars
-      ))
-    } else {
-      by_var <- data.frame(var=character(0), img_path=character(0), row=integer(0), col=integer(0))
-      if (nrow(vars)) {
-        vars <- vars[order(vars$row_start), ]
-        for (i in seq_len(nrow(by_sheet))) {
-          r_img <- by_sheet$row[i]
-          k <- max(which(vars$row_start <= r_img))
-          if (length(k) && is.finite(k)) {
-            by_var <- rbind(by_var, data.frame(
-              var = vars$var[k], img_path = by_sheet$img_path[i], row = by_sheet$row[i], col = by_sheet$col[i],
-              stringsAsFactors = FALSE
-            ))
-          }
-        }
+    # --- Self-contained helpers (no external deps required) ---
+    open_access_con_local <- function(ap) {
+      con <- try(RODBC::odbcConnectAccess2007(ap, believeNRows = FALSE), silent = TRUE)
+      if (inherits(con, "try-error") || is.null(con) || isTRUE(con < 0)) {
+        conn_str <- paste0("Driver={Microsoft Access Driver (*.mdb, *.accdb)};", "DBQ=", ap, ";Uid=;Pwd=;")
+        con <- try(RODBC::odbcDriverConnect(conn_str), silent = TRUE)
       }
-      rv_img_index(list(by_sheet = by_sheet, by_var = by_var, vars = vars))
+      if (inherits(con, "try-error") || is.null(con) || isTRUE(con < 0)) return(NULL)
+      con
+    }
+    sql_fetch_ci_local <- function(con, tbl, tmap) {
+      # Use the pre-scanned map of lower->real table names
+      real <- tmap[[tolower(tbl)]]
+      if (!is.null(real)) return(tryCatch(RODBC::sqlFetch(con, real), error = function(e) NULL))
+      # try cat_ prefix
+      real <- tmap[[paste0("cat_", tolower(tbl))]]
+      if (!is.null(real)) return(tryCatch(RODBC::sqlFetch(con, real), error = function(e) NULL))
+      NULL
+    }
+    pick_col_ci_local <- function(df, col) {
+      if (!is.data.frame(df)) return(NULL)
+      hit <- which(tolower(names(df)) == tolower(col))
+      if (!length(hit)) return(NULL)
+      df[[ hit[1] ]]
     }
     
-    if (supports_variable_view(s) && nrow(vars)) {
-      updateSelectInput(session, "var_picker", choices = vars$var, selected = vars$var[1])
-    } else {
-      updateSelectInput(session, "var_picker", choices = character(0))
-    }
+    tryCatch({
+      # Prefer loader function if present
+      if (exists("build_catalog_map")) {
+        append_log("[catalog] trying Loader build_catalog_map()")
+        mp <- try(build_catalog_map(), silent = TRUE)
+        if (!inherits(mp, "try-error") && is.list(mp) && length(mp)) {
+          rv_map(mp)
+          append_log("[catalog] map loaded via Loader: ", length(mp), " field(s)")
+          showNotification(sprintf("Catalog map loaded from Loader (%d fields).", length(mp)), type = "message")
+          return(invisible())
+        }
+        append_log("[catalog] Loader map unavailable; moving to RelCatalog.xlsx")
+      }
+      
+      # Read RelCatalog.xlsx
+      path  <- input$relcatalog_xlsx
+      sheet <- input$relcatalog_sheet %||% "RelCatalog"
+      if (!isTruthy(path) || !file.exists(path)) {
+        append_log("[catalog][ERROR] RelCatalog path not found: ", path)
+        showNotification("RelCatalog path is empty or not found.", type = "error")
+        return(invisible())
+      }
+      rc <- try(openxlsx::read.xlsx(path, sheet = sheet), silent = TRUE)
+      if (inherits(rc, "try-error") || !is.data.frame(rc) || !nrow(rc)) {
+        append_log("[catalog][ERROR] Cannot read RelCatalog sheet: ", sheet)
+        showNotification(sprintf("Cannot read RelCatalog sheet: %s", sheet), type = "error")
+        return(invisible())
+      }
+      
+      nms <- tolower(names(rc))
+      # Your relationships schema
+      if (!all(c("object","columnname","refobject","refcolumn") %in% nms)) {
+        append_log("[catalog][ERROR] RelCatalog sheet is not relationships schema (needs Object/ColumnName/RefObject/RefColumn)")
+        showNotification("RelCatalog sheet must have Object/ColumnName/RefObject/RefColumn.", type = "error")
+        return(invisible())
+      }
+      
+      # Open ACCDB once
+      con <- open_access_con_local(input$accdb_path)
+      if (is.null(con)) {
+        append_log("[catalog][ERROR] Cannot open ACCDB to resolve relationships.")
+        showNotification("Cannot open ACCDB to resolve relationships.", type = "error")
+        return(invisible())
+      }
+      on.exit(RODBC::odbcClose(con), add = TRUE)
+      
+      # Pre-scan table names once
+      tdf <- try(RODBC::sqlTables(con), silent = TRUE)
+      if (inherits(tdf, "try-error") || is.null(tdf)) {
+        append_log("[catalog][ERROR] ACCDB sqlTables() failed.")
+        showNotification("ACCDB metadata read failed.", type = "error")
+        return(invisible())
+      }
+      tnames <- unique(as.character(tdf$TABLE_NAME))
+      tmap   <- setNames(tnames, tolower(tnames))
+      
+      # Normalize RelCatalog; drop empties; cache each RefObject once
+      rc2 <- rc
+      names(rc2) <- tolower(names(rc2))
+      rc2[] <- lapply(rc2, function(v) trimws(as.character(v)))
+      rc2 <- unique(rc2[Reduce(`&`, lapply(rc2, nzchar)), , drop = FALSE])
+      robjs <- sort(unique(tolower(rc2$refobject)))
+      
+      # Progress over unique RefObjects
+      mp <- list()
+      withProgress(message = "Resolving catalog relationships…", value = 0, {
+        n <- length(robjs)
+        cache <- vector("list", n); names(cache) <- robjs
+        
+        for (k in seq_along(robjs)) {
+          ro <- robjs[k]
+          incProgress(k / max(1, n), detail = sprintf("Reading %s…", ro))
+          cache[[ro]] <- sql_fetch_ci_local(con, ro, tmap = tmap)
+        }
+        
+        # Build the map
+        for (i in seq_len(nrow(rc2))) {
+          obj  <- rc2$object[i]
+          col  <- rc2$columnname[i]
+          robj <- tolower(rc2$refobject[i])
+          rcol <- rc2$refcolumn[i]
+          
+          df <- cache[[robj]]
+          if (is.null(df)) next
+          vec <- pick_col_ci_local(df, rcol)
+          if (is.null(vec)) next
+          
+          key  <- paste0(tolower(obj), "$", tolower(col))
+          vals <- unique(as.character(vec)); vals <- vals[nzchar(vals)]
+          if (!length(vals)) next
+          
+          if (is.null(mp[[key]])) mp[[key]] <- vals else mp[[key]] <- unique(c(mp[[key]], vals))
+        }
+      })
+      
+      if (!length(mp)) {
+        append_log("[catalog][warn] Relationship map resolved to 0 field(s).")
+        showNotification("RelCatalog resolved to 0 fields.", type = "warning")
+        return(invisible())
+      }
+      
+      rv_map(mp)
+      append_log("[catalog] map built from relationships: ", length(mp), " field(s)")
+      showNotification(sprintf("Catalog map loaded (%d fields).", length(mp)), type = "message")
+      
+    }, error = function(e) {
+      append_log("[catalog][ERROR] ", conditionMessage(e))
+      showNotification(conditionMessage(e), type = "error")
+    })
   }, ignoreInit = TRUE)
+
+  
   
   output$var_label <- renderText({
     if (!supports_variable_view(input$sheet)) return("")
@@ -442,115 +835,55 @@ server <- function(input, output, session) {
     paste0("Variable: ", v)
   })
   
+  
   output$qc_table <- DT::renderDT({
-    f <- input$file; s <- input$sheet
-    req(isTruthy(f), file.exists(f), isTruthy(s))
-    f <- normalize_path(f)
+    viewer_busy(TRUE); on.exit(viewer_busy(FALSE), add = TRUE)
     
-    clean_chr <- function(x) { x <- as.character(x); x <- trimws(x); x[x == "" | x == "NA"] <- NA_character_; x }
-    
-    if (supports_variable_view(s)) {
-      sel_var <- input$var_picker
-      if (nzchar(sel_var)) {
-        raw <- tryCatch(openxlsx::read.xlsx(f, sheet = s, colNames = FALSE,
-                                            detectDates = TRUE, skipEmptyRows = FALSE, skipEmptyCols = FALSE),
-                        error = function(e) NULL)
-        validate(need(is.data.frame(raw) && nrow(raw) > 0, paste("Cannot read sheet:", s)))
+    withProgress(message = "Building table...", value = 0, {
+      blk <- prof_sheet_df(); req(!is.null(blk)); incProgress(0.2)
+      sh  <- input$sheet;      req(isTruthy(sh))
+      df  <- blk$df
+      
+      if (supports_variable_view(sh)) {
+        v <- input$var_picker; req(isTruthy(v))
+        validate(need(v %in% names(df), sprintf("Column '%s' not found in %s.", v, blk$table_name)))
+        mp  <- prof_map(); incProgress(0.6)
         
-        rx <- paste0("^\\s*[•\\-]\\s*", gsub("([\\W])", "\\\\\\1", sel_var), "\\s*\\(")
-        title_row <- NA_integer_
-        for (r in seq_len(nrow(raw))) {
-          row_vals <- as.character(raw[r, , drop = TRUE])
-          if (any(grepl(rx, row_vals))) { title_row <- r; break }
-        }
-        validate(need(!is.na(title_row), paste0("Variable title not found: ", sel_var)))
+        one <- prof_make_block(df, v, blk$table_name, mp = mp,
+                               mis_start = blk$mis_start, mis_end = blk$mis_end)
+        tbl <- one$table_df
+        validate(need(is.data.frame(tbl), "No rows to display for this variable."))
         
-        header_row <- title_row + 1L
-        data_row   <- title_row + 2L
-        validate(need(header_row <= nrow(raw), "Header row missing under the variable title."))
-        validate(need(data_row   <= nrow(raw), "No data line found under the variable title."))
+        rv_qc_df(tbl); incProgress(0.9)
         
-        hdr  <- clean_chr(unlist(raw[header_row, , drop = TRUE]))
-        vals <- clean_chr(unlist(raw[data_row,   , drop = TRUE]))
-        keep <- which(!(is.na(hdr) & is.na(vals)))
-        validate(need(length(keep) > 0, "Block has no visible headers/values."))
-        
-        df <- as.data.frame(t(vals[keep]), stringsAsFactors = FALSE)
-        col_names <- hdr[keep]
-        fill_idx  <- which(is.na(col_names) | col_names == "")
-        if (length(fill_idx)) col_names[fill_idx] <- paste0("Col_", keep[fill_idx])
-        col_names <- make.unique(col_names, sep = "_"); names(df) <- col_names
-        
-        rv_qc_df(df)
         return(DT::datatable(
-          df,
-          options  = list(dom = 't', paging = FALSE, ordering = FALSE, info = FALSE),
+          tbl,
+          options = list(
+            dom = if (nrow(tbl) > 15) "tip" else "t",
+            pageLength = min(15, max(5, nrow(tbl))),
+            scrollX = TRUE,
+            ordering = FALSE
+          ),
           selection = "single",
-          rownames = FALSE
+          rownames  = FALSE
         ))
       }
-    }
-    
-    df <- tryCatch(openxlsx::read.xlsx(f, sheet = s, colNames = TRUE, detectDates = TRUE,
-                                       skipEmptyRows = FALSE, skipEmptyCols = FALSE),
-                   error = function(e) NULL)
-    validate(need(is.data.frame(df), paste("Cannot read sheet:", s)))
-    fix_names <- function(x) { x <- as.character(x); x[is.na(x) | x == ""] <- "X"; make.unique(x, sep = "_") }
-    names(df) <- fix_names(names(df))
-    
-    if (nrow(df) == 0 && ncol(df) == 0) {
-      rv_qc_df(df)
-      return(DT::datatable(data.frame(note = sprintf("Sheet '%s' is empty.", s)),
-                           options = list(dom = 't', paging = FALSE, ordering = FALSE, info = FALSE),
-                           rownames = FALSE))
-    }
-    
-    rv_qc_df(df)
-    DT::datatable(
-      df,
-      options   = list(pageLength = 15, scrollX = TRUE),
-      selection = "single",
-      rownames  = FALSE
-    )
+      
+      # Full-sheet mode for Missions
+      validate(need(is.data.frame(df), paste("Cannot display table for:", blk$table_name)))
+      rv_qc_df(df); incProgress(0.9)
+      
+      DT::datatable(
+        df,
+        options = list(pageLength = 15, scrollX = TRUE),
+        selection = "single",
+        rownames  = FALSE
+      )
+    })
   })
   
-  output$img_gallery <- renderUI({
-    idx <- rv_img_index()
-    if (is.null(idx)) return(div("No images found.", style = "color:#666;"))
-    s <- input$sheet; sel_var <- input$var_picker
-    
-    imgs <- character(0)
-    if (supports_variable_view(s)) {
-      has_mapping <- !is.null(idx$by_var) && nrow(idx$by_var) > 0
-      if (nzchar(sel_var) && has_mapping) {
-        subset_rows <- idx$by_var$var == sel_var
-        imgs <- unique(idx$by_var$img_path[subset_rows])
-        if (!length(imgs)) return(div(sprintf("No images mapped to variable '%s'.", sel_var), style = "color:#666;"))
-      } else if (nzchar(sel_var) && !has_mapping) {
-        return(tags$div(
-          div("Images exist but this sheet has no anchor metadata to associate them to variables.", style = "color:#666; margin-bottom:6px;"),
-          div("Tip: plots were likely inserted without anchors for this mission/sheet.", style = "color:#666;")
-        ))
-      } else {
-        imgs <- unique(idx$by_sheet$img_path)
-      }
-    } else {
-      imgs <- unique(idx$by_sheet$img_path)
-    }
-    
-    if (!length(imgs)) return(div("No images available for this sheet/workbook.", style = "color:#666;"))
-    
-    tags$div(lapply(imgs, function(p) {
-      ext <- tolower(file_ext(p))
-      mime <- if (ext %in% c("png")) "image/png" else if (ext %in% c("jpg","jpeg")) "image/jpeg" else "image/png"
-      uri  <- tryCatch(base64enc::dataURI(file = p, mime = mime), error = function(e) NULL)
-      if (is.null(uri)) return(NULL)
-      tags$div(
-        tags$img(src = uri, style = "max-width:100%; border:1px solid #ddd; margin: 4px 0;"),
-        tags$div(basename(p), style = "font-size:12px; color:#666; margin-bottom:10px;")
-      )
-    }))
-  })
+  
+
   
   # ---------- Data Editor ----------
   # Load from Access DB (sidebar version; optional)

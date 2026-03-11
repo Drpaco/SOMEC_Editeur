@@ -36,6 +36,77 @@ server <- function(input, output, session) {
   #   append_log("[init] app started")
   # }, once = TRUE)
   
+  # ---- helpers (add once) ----
+  slugify <- function(x) {
+    x <- tolower(as.character(x))
+    x <- gsub("[^a-z0-9]+", "_", x)
+    x <- gsub("^_+|_+$", "", x)
+    x
+  }
+  
+  extract_all_images <- function(xlsx) {
+    test <- try(utils::unzip(xlsx, list = TRUE), silent = TRUE)
+    if (inherits(test, "try-error")) return(character(0))
+    tmpdir <- tempfile("unz_"); dir.create(tmpdir, showWarnings = FALSE, recursive = TRUE)
+    ok <- try(utils::unzip(xlsx, exdir = tmpdir), silent = TRUE)
+    if (inherits(ok, "try-error")) return(character(0))
+    media_dir <- file.path(tmpdir, "xl", "media")
+    if (!dir.exists(media_dir)) return(character(0))
+    list.files(media_dir, full.names = TRUE)
+  }
+  
+  # KEEP the full title and the stripped var, and flag categorical
+  # Returns: data.frame(var, full_title, is_categorical, row_start)
+  detect_variable_titles <- function(xlsx, sheet_name) {
+    raw <- tryCatch(
+      openxlsx::read.xlsx(
+        xlsx, sheet = sheet_name, colNames = FALSE,
+        detectDates = FALSE, skipEmptyRows = FALSE, skipEmptyCols = FALSE
+      ),
+      error = function(e) NULL
+    )
+    if (is.null(raw) || !nrow(raw)) {
+      return(data.frame(
+        var = character(0),
+        full_title = character(0),
+        is_categorical = logical(0),
+        row_start = integer(0)
+      ))
+    }
+    
+    out <- list()
+    for (r in seq_len(nrow(raw))) {
+      row_vals <- as.character(raw[r, , drop = TRUE])
+      # Title cells like "• name (" or "- name ("
+      hit <- which(vapply(row_vals, function(cell) {
+        if (is.na(cell)) return(FALSE)
+        grepl("^\\s*[•\\-]\\s*.+\\(", cell)
+      }, logical(1)))
+      if (length(hit)) {
+        full <- trimws(sub("^\\s*[•\\-]\\s*", "", as.character(row_vals[hit[1]])))
+        var_stripped <- trimws(sub("\\s*\\(.*$", "", full))
+        is_cat <- grepl("\\(\\s*cat(?:e|é)gor(?:ique|ical)\\s*\\)\\s*$", full, ignore.case = TRUE)
+        out[[length(out) + 1L]] <- data.frame(
+          var            = var_stripped,
+          full_title     = full,
+          is_categorical = is_cat,
+          row_start      = r,
+          stringsAsFactors = FALSE
+        )
+      }
+    }
+    
+    if (!length(out)) {
+      return(data.frame(
+        var = character(0),
+        full_title = character(0),
+        is_categorical = logical(0),
+        row_start = integer(0)
+      ))
+    }
+    do.call(rbind, out)
+  }
+  
   # scan function (no magic)
   scan_reports <- function(parent) {
     parent <- tryCatch(normalizePath(parent, winslash="/", mustWork=FALSE), error=function(e) parent)
@@ -54,6 +125,7 @@ server <- function(input, output, session) {
   observeEvent(input$reports_parent, {
     append_log("[init] reports_parent = ", input$reports_parent)
   }, ignoreInit = FALSE)
+  
   
   observeEvent(list(input$parent, input$refresh), {
     r <- scan_reports(input$parent)
