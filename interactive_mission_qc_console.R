@@ -18,16 +18,21 @@ suppressPackageStartupMessages({
 # CONFIG
 # ============================================================
 
-cfg <- list(
-  accdb_path =
-    "C:/Users/BolducF/Documents/ShinyApps/SOMEC/BaseDeDonnees/SOMEC_20251106.accdb",
-  context_dir =
-    "C:/Users/BolducF/Documents/ShinyApps/SOMEC/GestionDeDonnees/GlobalContext",
-  mission_reports_dir =
-    "C:/Users/BolducF/Documents/ShinyApps/SOMEC/GestionDeDonnees/MissionReports",
-  cache_dir =
-    "C:/Users/BolducF/Documents/ShinyApps/SOMEC/GestionDeDonnees/GlobalContext/_cache"
-)
+if (.Platform$OS.type == "windows") {
+  cfg <- list(
+    accdb_path          = "C:/Users/BolducF/Documents/ShinyApps/SOMEC/BaseDeDonnees/SOMEC_20251106.accdb",
+    context_dir         = "C:/Users/BolducF/Documents/ShinyApps/SOMEC/GestionDeDonnees/GlobalContext",
+    mission_reports_dir = "C:/Users/BolducF/Documents/ShinyApps/SOMEC/GestionDeDonnees/MissionReports",
+    cache_dir           = "_cache"
+  )
+} else {
+  cfg <- list(
+    accdb_path          = NULL,   # not accessible on macOS
+    context_dir         = "_cache",
+    mission_reports_dir = "_cache",
+    cache_dir           = "_cache"
+  )
+}
 
 dir.create(cfg$cache_dir, showWarnings = FALSE, recursive = TRUE)
 
@@ -40,6 +45,18 @@ load_access_table_cached <- function(accdb_path, table_name, cache_dir) {
   if (file.exists(cache_file) &&
       file.info(cache_file)$mtime >= file.info(accdb_path)$mtime) {
     return(readRDS(cache_file))
+  }
+  if (file.exists(cache_file)) {
+    message("⚠️  Cache may be stale (can't check .accdb on this platform). Loading cached version.")
+    return(readRDS(cache_file))
+  }
+  if (!exists("odbcConnectAccess2007", where = asNamespace("RODBC"), inherits = FALSE)) {
+    stop(
+      "No cache found for '", table_name, "' and odbcConnectAccess2007 is not available ",
+      "on this platform (macOS).\n",
+      "Run the export script on Windows first to generate the .rds cache files, ",
+      "then copy them to:\n  ", cache_dir
+    )
   }
   con <- RODBC::odbcConnectAccess2007(accdb_path, believeNRows = FALSE)
   on.exit(RODBC::odbcClose(con), add = TRUE)
@@ -196,7 +213,37 @@ explain_issue <- function(issue_row, mission_id) {
     
     if (any(outliers, na.rm = TRUE)) {
       cat("  min outlier:", min(x[outliers], na.rm = TRUE), "\n")
-      cat("  max outlier:", max(x[outliers], na.rm = TRUE), "\n")
+      cat("  max outlier:", max(x[outliers], na.rm = TRUE), "\n\n")
+      
+      cat("OUTLIER ROWS:\n")
+      outlier_rows <- df_mis[!is.na(outliers) & outliers, ]
+      print(outlier_rows, n = Inf)
+      
+      plot_df <- tibble(value = x, is_outlier = outliers)
+      p <- ggplot(plot_df, aes(x = 0, y = value)) +
+        geom_jitter(aes(color = is_outlier), width = 0.15, size = 2, alpha = 0.7) +
+        geom_hline(yintercept = gb$p05, linetype = "dashed", color = "steelblue",
+                   linewidth = 0.8) +
+        geom_hline(yintercept = gb$p95, linetype = "dashed", color = "steelblue",
+                   linewidth = 0.8) +
+        geom_hline(yintercept = gb$p50, linetype = "dotted", color = "grey40",
+                   linewidth = 0.6) +
+        scale_color_manual(
+          values = c("FALSE" = "grey60", "TRUE" = "firebrick"),
+          labels = c("FALSE" = "Normal", "TRUE" = "Outlier")
+        ) +
+        labs(
+          title = paste0("Numeric QC — ", tbl, "$", col),
+          subtitle = paste0("Mission: ", mission_id,
+                            "  |  Global p05=", gb$p05,
+                            "  p50=", gb$p50,
+                            "  p95=", gb$p95),
+          y = col, x = NULL, color = NULL
+        ) +
+        theme_minimal() +
+        theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+      
+      print(p)
     }
     
     cat("\nSUGGESTED QA ACTIONS:\n")
