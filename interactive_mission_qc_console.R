@@ -18,19 +18,30 @@ suppressPackageStartupMessages({
 # CONFIG
 # ============================================================
 
+# Always resolve paths relative to this script's location (repo root),
+# regardless of the working directory on any platform.
+.repo_root  <- tryCatch(
+  dirname(normalizePath(sys.frames()[[1]]$ofile, mustWork = TRUE)),
+  error = function(e) getwd()  # fallback when run interactively line-by-line
+)
+
+# SOMEC/ is a sibling of SOMEC_Editeur/ inside ShinyApps/
+.somec_root <- file.path(dirname(.repo_root), "SOMEC")
+.cache_dir  <- file.path(.repo_root, "_cache")
+
 if (.Platform$OS.type == "windows") {
   cfg <- list(
-    accdb_path          = "C:/Users/BolducF/Documents/ShinyApps/SOMEC/BaseDeDonnees/SOMEC_20251106.accdb",
-    context_dir         = "C:/Users/BolducF/Documents/ShinyApps/SOMEC/GestionDeDonnees/GlobalContext",
-    mission_reports_dir = "C:/Users/BolducF/Documents/ShinyApps/SOMEC/GestionDeDonnees/MissionReports",
-    cache_dir           = "_cache"
+    accdb_path          = file.path(.somec_root, "BaseDeDonnees", "SOMEC_20251106.accdb"),
+    context_dir         = file.path(.somec_root, "GestionDeDonnees", "GlobalContext"),
+    mission_reports_dir = file.path(.somec_root, "GestionDeDonnees", "MissionReports"),
+    cache_dir           = .cache_dir
   )
 } else {
   cfg <- list(
     accdb_path          = NULL,   # not accessible on macOS
-    context_dir         = "_cache",
-    mission_reports_dir = "_cache",
-    cache_dir           = "_cache"
+    context_dir         = .cache_dir,
+    mission_reports_dir = .cache_dir,
+    cache_dir           = .cache_dir
   )
 }
 
