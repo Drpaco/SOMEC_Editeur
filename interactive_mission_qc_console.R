@@ -20,7 +20,7 @@ suppressPackageStartupMessages({
 
 # Always resolve paths relative to this script's location (repo root),
 # regardless of the working directory on any platform.
-.repo_root <- tryCatch(
+.repo_root <- tryCatch({
   # Works when script is sourced via source()
   frames <- sys.frames()
   ofiles <- Filter(Negate(is.null), lapply(frames, function(f) f$ofile))
