@@ -14,13 +14,14 @@ suppressPackageStartupMessages({
 
 # ---------------- CONFIG ----------------
 cfg <- list(
-  base_dir = file.path("U:", "SOMEC", "BaseDeDonnees", "GestionDeDonnees"),
-  out_folder = paste0("MissionReports_", format(Sys.Date(), "%Y%m%d")),
+  base_dir = file.path("C:", 'Users','BolducF','Documents','ShinyApps',"SOMEC", "BaseDeDonnees", "GestionDeDonnees"),
+  out_folder = "MissionReports",
+  force_rebuild = FALSE, #TRUE si on a besoin de refaire les fichiers excel
   
   # Paths used by FILE A (loader) — keep in sync with catalog_loader.R
-  relcatalog_xlsx  = "U:/SOMEC/BaseDeDonnees/GestionDeDonnees/RelCatalog_YYYYMMDD.xlsx",
+  relcatalog_xlsx  = "C:/Users/BolducF/Documents/ShinyApps/SOMEC/GestionDeDonnees/RelCatalog.xlsx",
   relcatalog_sheet = "RelCatalog",
-  accdb_path       = "U:/SOMEC/BaseDeDonnees/SOMEC_20251106.accdb",
+  accdb_path       = "C:/Users/BolducF/Documents/ShinyApps/SOMEC/BaseDeDonnees/SOMEC_20251106.accdb",
   
   rare_threshold_pct = 0.1,
   max_levels_show = 20,
@@ -227,6 +228,40 @@ write_one_sheet <- function(wb, sheet_name, df, mission_id, mis_start, mis_end, 
       n_missing = sum(is.na(x_num))
     )
     
+    stats <- numeric_summary(x_num)
+    
+    if (stats$n > 0) {
+      
+      is_low  <- x_num < stats$outlier_low
+      is_high <- x_num > stats$outlier_high
+      
+      n_low  <- sum(is_low, na.rm = TRUE)
+      n_high <- sum(is_high, na.rm = TRUE)
+      
+      if (n_low + n_high > 0) {
+        
+        qc_summary$numeric_outliers <- add_row(
+          qc_summary$numeric_outliers,
+          table   = table_name,
+          column  = col,
+          n_low   = n_low,
+          n_high  = n_high
+        )
+        
+        mission_issues <<- add_row(
+          mission_issues,
+          mission    = mission_id,
+          table      = table_name,
+          column     = col,
+          issue_type = "NUMERIC_OUTLIER",
+          details    = paste(
+            n_low, "below IQR-low;",
+            n_high, "above IQR-high"
+          )
+        )
+      }
+    }
+    
     # Plot only if there is at least one non-NA numeric value
     p <- if (s$n[1] > 0) plot_hist(x_num, title = col, xlab = col) else NULL
     
@@ -269,6 +304,17 @@ write_one_sheet <- function(wb, sheet_name, df, mission_id, mis_start, mis_end, 
           count(value, sort = TRUE, name = "n_records") |>
           slice_head(n = cfg$top_unknowns_per_col) |>
           mutate(table = table_name, column = col, .before = 1)
+      }
+      
+      if (any(is_unknown)) {
+        mission_issues <<- add_row(
+          mission_issues,
+          mission    = mission_id,
+          table      = table_name,
+          column     = col,
+          issue_type = "UNKNOWN_CATALOG",
+          details    = paste(unique(vals[is_unknown]), collapse = ", ")
+        )
       }
       
       qc_summary$catalog_unknowns <- add_row(
@@ -343,15 +389,42 @@ write_one_sheet <- function(wb, sheet_name, df, mission_id, mis_start, mis_end, 
     if (!is.na(n_out) && n_out > 0) {
       qc_summary$mission_bounds <- add_row(qc_summary$mission_bounds, table = table_name, column = col, n_outside = n_out)
     }
+    
+    if (!is.na(n_out) && n_out > 0) {
+      mission_issues <<- add_row(
+        mission_issues,
+        mission    = mission_id,
+        table      = table_name,
+        column     = col,
+        issue_type = "OUTSIDE_MISSION_DATES",
+        details    = paste(n_out, "records outside mission period")
+      )
+    }
   }
   
   return(qc_summary)
 }
 
 # ---------------- Main loop ----------------
+# ---- Accumulator for mission-level issues (NEW) ----
+mission_issues <- tibble(
+  mission    = character(),
+  table      = character(),
+  column     = character(),
+  issue_type = character(),
+  details    = character()
+)
+
 all_index <- list()
 for (i in seq_len(nrow(missions_df))) {
   mis_id <- missions_df$mission[i]
+  out_file <- file.path(out_dir, paste0(mis_id, ".xlsx"))
+  
+  if (!cfg$force_rebuild && file.exists(out_file)) {
+    message(sprintf("[%d/%d] Mission %s — report exists, skipping",
+                    i, nrow(missions_df), mis_id))
+    next
+  }
   message(sprintf("[%d/%d] Mission %s — start", i, nrow(missions_df), mis_id))
   m_row  <- missions %>% filter(mission == mis_id) %>% slice_head(n = 1)
   t_df   <- transects %>% filter(mission == mis_id)
@@ -408,9 +481,31 @@ for (i in seq_len(nrow(missions_df))) {
   message(sprintf("[%d/%d] Mission %s — done", i, nrow(missions_df), mis_id))
 }
 
+# mission_issues <- tibble(
+#   mission,
+#   table,
+#   column,
+#   issue_type,   # "UNKNOWN_CATALOG", "RARE_IN_MISSION", "OUTLIER", etc.
+#   details
+# )
+
 # Global index
 idx <- bind_rows(all_index)
 wb_idx <- createWorkbook(); addWorksheet(wb_idx, "Index"); writeData(wb_idx, "Index", idx, startRow = 1, startCol = 1)
 idx_path <- file.path(out_dir, paste0("SOMEC_Mission_QAQC_Index_", format(Sys.Date(), "%Y%m%d"), ".xlsx"))
 saveWorkbook(wb_idx, idx_path, overwrite = TRUE)
 message("Profiler complete: ", idx_path)
+
+mi_path <- file.path(out_dir, "mission_issues.rds")
+
+if (!cfg$force_rebuild && file.exists(mi_path)) {
+  message("mission_issues.rds exists — skipping save.")
+} else {
+  saveRDS(mission_issues, mi_path)
+}
+
+#if needed : 
+# if (file.exists(mi_path)) {
+#   file.remove(mi_path)
+# }
+# file.exists(mi_path)

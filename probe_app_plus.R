@@ -148,6 +148,7 @@ tags$style(HTML("
       ),
       textInput("relcatalog_sheet", "Sheet:", value = "RelCatalog", width = "100%"),
       actionButton("load_relcatalog", "Load catalog map"),
+      actionButton("load_catalog_inapp", "Load catalog (from loader) for Viewer"),
       tags$hr()
     ),
     
@@ -189,6 +190,7 @@ tags$style(HTML("
               width = 5,
               h4("Status"),
               textOutput("qc_status"),
+              textOutput("catalog_status"),
               uiOutput("viewer_busy_ribbon"),
               tags$hr(),
               h4("QC table"),
@@ -269,23 +271,102 @@ server <- function(input, output, session) {
     tolower(s) %in% c("transects","observations")
   }
   
-  catalog_allowed_for <- function(mp, table_name, col) {
-    if (!is.list(mp) || !length(mp)) return(NULL)
-    key <- paste0(tolower(table_name), "$", tolower(col))
-    if (!key %in% names(mp)) { append_log("[catalog] no map for key: ", key); return(NULL) }
-    append_log("[catalog] map HIT for key: ", key)
-    mp[[key]]
+  # ---- Normalization helpers (use once) ----
+  rm_accents <- function(x) {
+    y <- try(iconv(x, from = "", to = "ASCII//TRANSLIT"), silent = TRUE)
+    if (inherits(y, "try-error") || all(is.na(y))) x else y
+  }
+  norm_tag <- function(x) {
+    x <- as.character(x)
+    x <- rm_accents(x)
+    x <- tolower(x)
+    x <- gsub("[^a-z0-9]+", "_", x)     # collapse non-alnum to "_"
+    x <- gsub("^_+|_+$", "", x)         # trim underscores
+    x
   }
   
-  # pick a column by case-insensitive candidates; returns the *real* column name or NULL
-  pick_colname_ci <- function(df, candidates) {
-    nms <- names(df); low <- tolower(nms)
-    for (cand in tolower(candidates)) {
-      hit <- which(low == cand)
-      if (length(hit)) return(nms[hit[1]])
+  # ---- Catalog-aware fuzzy table fetch ----
+  # tries: exact, 'cat_' prefixed, normalized name, normalized 'cat_' name, suffix after 'cat_'
+  sql_fetch_ci <- function(con, tbl, tmap = NULL) {
+    if (is.null(con)) return(NULL)
+    # Build table map (lower -> real) if not provided
+    if (is.null(tmap)) {
+      tdf <- try(RODBC::sqlTables(con), silent = TRUE)
+      if (inherits(tdf, "try-error") || is.null(tdf)) return(NULL)
+      reals <- unique(as.character(tdf$TABLE_NAME))
+    } else {
+      reals <- unname(unlist(tmap))
     }
+    low   <- tolower(reals)
+    norm  <- vapply(reals, norm_tag, character(1))
+    
+    want_raw  <- as.character(tbl)
+    want_low  <- tolower(want_raw)
+    want_norm <- norm_tag(want_raw)
+    
+    # 1) exact
+    hit <- which(low == want_low)
+    if (length(hit)) return(tryCatch(RODBC::sqlFetch(con, reals[hit[1]]), error = function(e) NULL))
+    
+    # 2) try 'cat_' prefixed request
+    want_low2 <- paste0("cat_", want_low)
+    hit <- which(low == want_low2)
+    if (length(hit)) return(tryCatch(RODBC::sqlFetch(con, reals[hit[1]]), error = function(e) NULL))
+    
+    # 3) normalized name
+    hit <- which(norm == want_norm)
+    if (length(hit)) return(tryCatch(RODBC::sqlFetch(con, reals[hit[1]]), error = function(e) NULL))
+    
+    # 4) normalized among DB tables with 'cat_' prefix
+    cat_mask <- startsWith(low, "cat_")
+    hit <- which(vapply(reals[cat_mask], norm_tag, character(1)) == want_norm)
+    if (length(hit)) {
+      real <- reals[which(cat_mask)[hit[1]]]
+      return(tryCatch(RODBC::sqlFetch(con, real), error = function(e) NULL))
+    }
+    
+    # 5) suffix after 'cat_' normalized equals request
+    suf_norm <- vapply(sub("^cat_", "", low), norm_tag, character(1))
+    hit <- which(suf_norm == want_norm)
+    if (length(hit)) return(tryCatch(RODBC::sqlFetch(con, reals[hit[1]]), error = function(e) NULL))
+    
     NULL
   }
+  
+  # ---- Catalog-aware fuzzy column pick ----
+  # tries: exact (case-insensitive), normalized, common 'code' synonyms, then first column containing 'code'
+  pick_col_ci <- function(df, col) {
+    if (!is.data.frame(df)) return(NULL)
+    want_raw  <- as.character(col)
+    want_low  <- tolower(want_raw)
+    want_norm <- norm_tag(want_raw)
+    
+    nms  <- names(df)
+    low  <- tolower(nms)
+    norm <- vapply(nms, norm_tag, character(1))
+    
+    # 1) exact (case-insensitive)
+    hit <- which(low == want_low)
+    if (length(hit)) return(df[[ hit[1] ]])
+    
+    # 2) normalized
+    hit <- which(norm == want_norm)
+    if (length(hit)) return(df[[ hit[1] ]])
+    
+    # 3) 'code' synonyms
+    pref <- c("codefr","code","cod","id","valeur","value")
+    for (p in pref) {
+      hit <- which(low == p)
+      if (length(hit)) return(df[[ hit[1] ]])
+    }
+    
+    # 4) any column containing 'code'
+    hit <- which(grepl("code", low))
+    if (length(hit)) return(df[[ hit[1] ]])
+    
+    NULL
+  }
+  
   filter_by_mission_ci <- function(df, mission_value) {
     if (!is.data.frame(df) || !nzchar(mission_value)) return(df)
     col <- pick_colname_ci(df, c("mission","mission_id","id_mission"))
@@ -378,9 +459,35 @@ server <- function(input, output, session) {
       ft$rare <- ft$pct < (100 * RARE_PCT)
       
       if (has_catalog) {
-        ft$`found in the catalog` <- ft$value %in% allowed
+        # Canonicalize as character
+        allowed_all <- trimws(as.character(allowed))
+        ft_vals_raw <- trimws(as.character(ft$value))
+        
+        # Helper: are all non-NA tokens digits only?
+        is_digits <- function(v) {
+          if (!length(v)) return(FALSE)
+          all(is.na(v) | grepl("^[0-9]+$", v))
+        }
+        
+        if (is_digits(ft_vals_raw) && is_digits(allowed_all)) {
+          # Determine a common width across BOTH sets (handles "1" vs "01")
+          w_ft  <- suppressWarnings(max(nchar(ft_vals_raw[nzchar(ft_vals_raw)]), na.rm = TRUE))
+          w_all <- suppressWarnings(max(nchar(allowed_all[nzchar(allowed_all)]), na.rm = TRUE))
+          w     <- max(w_ft, w_all)
+          pad   <- function(v) ifelse(is.na(v) | !nzchar(v), v, sprintf(paste0("%0", w, "s"), v))
+          
+          ft_vals_cmp <- pad(ft_vals_raw)
+          allowed_cmp <- unique(pad(allowed_all))
+        } else {
+          # Non-pure-digit domains: compare as trimmed strings
+          ft_vals_cmp <- ft_vals_raw
+          allowed_cmp <- unique(allowed_all)
+        }
+        
+        ft$`found in the catalog` <- ft_vals_cmp %in% allowed_cmp
         ft <- ft[, c("value", "n", "pct", "rare", "found in the catalog")]
       } else {
+        # No map for this field → do not show the flag column
         ft <- ft[, c("value", "n", "pct", "rare")]
       }
       
@@ -467,6 +574,21 @@ server <- function(input, output, session) {
     )
   })
   
+  # Probe: see which key is used for the current selection and if it maps
+  observeEvent(list(input$sheet, input$var_picker, prof_sheet_df()), {
+    req(supports_variable_view(input$sheet))
+    blk <- prof_sheet_df(); req(!is.null(blk))
+    v   <- input$var_picker; req(isTruthy(v))
+    mp  <- prof_map()
+    
+    allowed <- catalog_allowed_for(mp, blk$table_name, v)
+    if (is.null(allowed)) {
+      append_log(sprintf("[catalog][probe] NO MAP for key candidates around: %s$%s", blk$table_name, v))
+    } else {
+      append_log(sprintf("[catalog][probe] MAP HIT for %s$%s (allowed=%d)", blk$table_name, v, length(allowed)))
+    }
+  }, ignoreInit = FALSE)
+  
   observeEvent(prof_sheet_df(), {
     blk <- prof_sheet_df(); if (is.null(blk)) return()
     # Only expose variables for Transects/Observations (variable view)
@@ -513,72 +635,87 @@ server <- function(input, output, session) {
     mp
   }
   
-  # ---------- Build map from relationship-style RelCatalog ----------
-  # Expects headers: Object | ColumnName | RefObject | RefColumn (case-insensitive)
+  # ---------- Relationship-style RelCatalog (supports forward & reverse rows) ----------
+  # Headers: Object | ColumnName | RefObject | RefColumn (case-insensitive)
+  # Key built as: tolower(<data_table>)$tolower(<data_column>)
+  # Allowed values read from the opposite side (catalog table/column), resolved fuzzily.
   build_catalog_map_from_relationships <- function(rc_df, accdb_path, progress = NULL) {
     stopifnot(is.data.frame(rc_df))
-    
-    # normalize headers
     nms <- tolower(names(rc_df)); names(rc_df) <- nms
     need <- c("object","columnname","refobject","refcolumn")
     if (!all(need %in% nms)) return(NULL)
     
+    # trim & drop empties
     rc <- rc_df[, need]
-    names(rc) <- c("object","column","refobject","refcolumn")
     rc[] <- lapply(rc, function(v) trimws(as.character(v)))
-    rc <- unique(rc[Reduce(`&`, lapply(rc, nzchar)), , drop = FALSE])
+    rc <- unique(rc[ Reduce(`&`, lapply(rc, nzchar)), , drop = FALSE ])
     if (!nrow(rc)) return(NULL)
     
     con <- open_access_con(accdb_path)
     if (is.null(con)) return(NULL)
     on.exit(RODBC::odbcClose(con), add = TRUE)
     
-    # Pre-scan table names once to avoid expensive sqlTables() calls in the loop
+    # table name map lower -> real
     tdf <- try(RODBC::sqlTables(con), silent = TRUE)
     if (inherits(tdf, "try-error") || is.null(tdf)) return(NULL)
     tnames <- unique(as.character(tdf$TABLE_NAME))
-    tmap <- setNames(tnames, tolower(tnames))   # lower -> real
+    tmap   <- setNames(tnames, tolower(tnames))
     
-    # cache per RefObject
-    robjs <- sort(unique(tolower(rc$refobject)))
-    cache <- vector("list", length(robjs)); names(cache) <- robjs
+    # known data tables (extend if you have more)
+    data_tables <- c("missions","transects","observations")
     
-    # progress by unique RefObject
-    n <- length(robjs); k <- 0L
-    for (ro in robjs) {
-      k <- k + 1L
-      if (!is.null(progress)) progress$set(value = k / max(1, n),
-                                           message = sprintf("Catalog: %s (%d/%d)", ro, k, n))
-      df <- sql_fetch_ci(con, ro, tmap = tmap)
-      cache[[ro]] <- df
-    }
-    
-    # build the map
     mp <- list()
-    for (i in seq_len(nrow(rc))) {
-      obj  <- rc$object[i]
-      col  <- rc$column[i]
-      robj <- tolower(rc$refobject[i])
+    total <- nrow(rc)
+    for (i in seq_len(total)) {
+      if (!is.null(progress)) progress$set(value = i/total,
+                                           message = "Building catalog map…",
+                                           detail = sprintf("Row %d/%d", i, total))
+      obj  <- tolower(rc$object[i])      # may be CATALOG or DATA
+      col  <- rc$columnname[i]
+      robj <- tolower(rc$refobject[i])   # may be DATA or CATALOG
       rcol <- rc$refcolumn[i]
       
-      df <- cache[[robj]]
-      if (is.null(df)) next
-      vec <- pick_col_ci(df, rcol)
+      # Detect which side is the data field
+      # A) reverse: data = RefObject/RefColumn (e.g., transects.meteo)
+      if (robj %in% data_tables) {
+        data_tbl <- robj; data_col <- rcol     # data
+        cat_tbl  <- obj;  cat_col  <- col      # catalog
+        # B) forward: data = Object/ColumnName
+      } else if (obj %in% data_tables) {
+        data_tbl <- obj;  data_col <- col
+        cat_tbl  <- robj; cat_col  <- rcol
+      } else {
+        # Fall back: if one side exists in DB as 'cat_*' or similar
+        # prefer the other side as data if it's a known data table by suffix
+        if (startsWith(obj, "cat_") || (!is.null(tmap[[paste0("cat_", obj)]]))) {
+          data_tbl <- robj; data_col <- rcol; cat_tbl <- obj; cat_col <- col
+        } else if (startsWith(robj, "cat_") || (!is.null(tmap[[paste0("cat_", robj)]]))) {
+          data_tbl <- obj; data_col <- col; cat_tbl <- robj; cat_col <- rcol
+        } else {
+          next
+        }
+      }
+      
+      # Read catalog column
+      cat_df <- sql_fetch_ci(con, cat_tbl, tmap = tmap)
+      if (is.null(cat_df)) next
+      vec <- pick_col_ci(cat_df, cat_col)
       if (is.null(vec)) next
       
-      key  <- paste0(tolower(obj), "$", tolower(col))
+      key  <- paste0(tolower(data_tbl), "$", tolower(data_col))
       vals <- unique(as.character(vec)); vals <- vals[nzchar(vals)]
       if (!length(vals)) next
       
       if (is.null(mp[[key]])) mp[[key]] <- vals else mp[[key]] <- unique(c(mp[[key]], vals))
     }
     
-    attr(mp, "matched_columns") <- list(mode = "relationships",
-                                        object = "Object", column = "ColumnName",
-                                        ref_object = "RefObject", ref_column = "RefColumn")
+    # Optional log
+    if (exists("append_log")) {
+      append_log(sprintf("[catalog] relationships map built: keys=%d; sample: %s",
+                         length(mp), if (length(mp)) paste(head(names(mp), 6), collapse = ", ") else "<none>"))
+    }
     mp
   }
-  
   
   output$prof_hist <- renderPlot({
     req(supports_variable_view(input$sheet))
@@ -627,18 +764,44 @@ server <- function(input, output, session) {
   })
   
   rv_map <- reactiveVal(NULL)
+  rv_map_norm <- reactiveVal(NULL)  # normalized keys map
+  
+  # From a raw mp (list: "Object$ColumnName" -> values), produce a normalized map:
+  # keys: norm_table_name(Object) + "$" + norm_name(ColumnName)
+  # values: canonicalized character vector, unique + trimmed
+  build_normalized_map <- function(mp_raw) {
+    if (!is.list(mp_raw) || !length(mp_raw)) return(list())
+    out <- list()
+    for (k in names(mp_raw)) {
+      vals <- mp_raw[[k]]
+      # parse "object$column" robustly
+      parts <- strsplit(k, "\\$", fixed = FALSE)[[1]]
+      if (length(parts) != 2) next
+      obj <- norm_table_name(parts[1])
+      col <- norm_name(parts[2])
+      
+      key <- paste0(obj, "$", col)
+      
+      v <- as.character(vals)
+      v <- trimws(v)
+      v <- v[nzchar(v)]
+      if (!length(v)) next
+      
+      if (is.null(out[[key]])) out[[key]] <- unique(v)
+      else out[[key]] <- unique(c(out[[key]], v))
+    }
+    out
+  }
   
   prof_map <- reactive({
-    # 1) Explicit cache (preferred)
+    mpn <- rv_map_norm()
+    if (is.list(mpn) && length(mpn)) return(mpn)
     mp <- rv_map()
-    if (is.list(mp) && length(mp)) return(mp)
-    
-    # 2) Fallback to Loader's function if it exists (no button)
+    if (is.list(mp) && length(mp)) return(build_normalized_map(mp))
     if (exists("build_catalog_map")) {
       mp2 <- try(build_catalog_map(), silent = TRUE)
-      if (!inherits(mp2, "try-error") && is.list(mp2)) return(mp2)
+      if (!inherits(mp2, "try-error") && is.list(mp2)) return(build_normalized_map(mp2))
     }
-    # 3) Empty map
     list()
   })
   
@@ -654,179 +817,101 @@ server <- function(input, output, session) {
     con
   }
   
-  # Case-insensitive table fetch; also tries 'cat_' prefix
-  sql_fetch_ci <- function(con, tbl, tmap = NULL) {
-    # Use pre-scanned table map if provided
-    if (!is.null(tmap)) {
-      real <- tmap[[tolower(tbl)]]
-      if (!is.null(real)) return(tryCatch(RODBC::sqlFetch(con, real), error = function(e) NULL))
-      # try 'cat_' prefix
-      real <- tmap[[paste0("cat_", tolower(tbl))]]
-      if (!is.null(real)) return(tryCatch(RODBC::sqlFetch(con, real), error = function(e) NULL))
-      return(NULL)
-    }
-    all_tbls <- try(RODBC::sqlTables(con), silent = TRUE)
-    if (inherits(all_tbls, "try-error") || is.null(all_tbls)) return(NULL)
-    tnames <- unique(as.character(all_tbls$TABLE_NAME))
-    hit <- tnames[tolower(tnames) == tolower(tbl)]
-    if (!length(hit)) hit <- tnames[tolower(tnames) == paste0("cat_", tolower(tbl))]
-    if (!length(hit)) return(NULL)
-    tryCatch(RODBC::sqlFetch(con, hit[1]), error = function(e) NULL)
-  }
   
-  # Case-insensitive column accessor
-  pick_col_ci <- function(df, col) {
-    if (!is.data.frame(df)) return(NULL)
-    hit <- which(tolower(names(df)) == tolower(col))
-    if (!length(hit)) return(NULL)
-    df[[ hit[1] ]]
-  }
-  
-  observeEvent(input$load_relcatalog, {
-    # --- Immediate visual feedback so you know the click is received ---
-    notif_id <- showNotification("Loading RelCatalog…", type = "message", duration = NULL, closeButton = TRUE)
-    on.exit({ try(removeNotification(notif_id), silent = TRUE) }, add = TRUE)
-    
-    append_log("[catalog] load_relcatalog clicked")
-    
-    # --- Self-contained helpers (no external deps required) ---
-    open_access_con_local <- function(ap) {
-      con <- try(RODBC::odbcConnectAccess2007(ap, believeNRows = FALSE), silent = TRUE)
-      if (inherits(con, "try-error") || is.null(con) || isTRUE(con < 0)) {
-        conn_str <- paste0("Driver={Microsoft Access Driver (*.mdb, *.accdb)};", "DBQ=", ap, ";Uid=;Pwd=;")
-        con <- try(RODBC::odbcDriverConnect(conn_str), silent = TRUE)
-      }
-      if (inherits(con, "try-error") || is.null(con) || isTRUE(con < 0)) return(NULL)
-      con
-    }
-    sql_fetch_ci_local <- function(con, tbl, tmap) {
-      # Use the pre-scanned map of lower->real table names
-      real <- tmap[[tolower(tbl)]]
-      if (!is.null(real)) return(tryCatch(RODBC::sqlFetch(con, real), error = function(e) NULL))
-      # try cat_ prefix
-      real <- tmap[[paste0("cat_", tolower(tbl))]]
-      if (!is.null(real)) return(tryCatch(RODBC::sqlFetch(con, real), error = function(e) NULL))
-      NULL
-    }
-    pick_col_ci_local <- function(df, col) {
-      if (!is.data.frame(df)) return(NULL)
-      hit <- which(tolower(names(df)) == tolower(col))
-      if (!length(hit)) return(NULL)
-      df[[ hit[1] ]]
-    }
+    observeEvent(input$load_relcatalog, {
+      nid <- showNotification("Loading RelCatalog…", type = "message",
+                              duration = NULL, closeButton = TRUE)
+      on.exit(try(removeNotification(nid), silent = TRUE), add = TRUE)
+      
+      append_log("[catalog] load_relcatalog clicked")
+      
+      tryCatch({
+        path  <- input$relcatalog_xlsx
+        sheet <- input$relcatalog_sheet %||% "RelCatalog"
+        validate(need(isTruthy(path) && file.exists(path), "RelCatalog path is empty or not found."))
+        
+        rc <- try(openxlsx::read.xlsx(path, sheet = sheet), silent = TRUE)
+        validate(need(!inherits(rc, "try-error") && is.data.frame(rc) && nrow(rc) > 0,
+                      sprintf("Cannot read RelCatalog sheet: %s", sheet)))
+        
+        # Build from relationships (supports forward + reverse rows, fuzzy catalog resolution)
+        withProgress(message = "Building catalog map from relationships…", value = 0, {
+          mp <- build_catalog_map_from_relationships(rc, input$accdb_path, progress = shiny::Progress$new())
+        })
+        validate(need(is.list(mp) && length(mp) > 0, "RelCatalog resolved to 0 fields."))
+        
+        # Save both raw and normalized maps
+        rv_map(mp)
+        rv_map_norm(build_normalized_map(mp))
+        
+        showNotification(sprintf("Catalog map loaded (%d fields).", length(mp)), type = "message")
+        append_log(sprintf("[catalog] ready: %d fields; has transects$meteo? %s",
+                           length(mp),
+                           if ("transects$meteo" %in% names(mp)) "YES" else "NO"))
+      }, error = function(e) {
+        append_log("[catalog][ERROR] ", conditionMessage(e))
+        showNotification(conditionMessage(e), type = "error")
+      })
+    }, ignoreInit = TRUE)
+
+  observeEvent(input$load_catalog_inapp, {
+    # Immediate toast so you know the click is received
+    nid <- showNotification("Sourcing loader and building catalog…", type = "message",
+                            duration = NULL, closeButton = TRUE)
+    on.exit(try(removeNotification(nid), silent = TRUE), add = TRUE)
     
     tryCatch({
-      # Prefer loader function if present
-      if (exists("build_catalog_map")) {
-        append_log("[catalog] trying Loader build_catalog_map()")
-        mp <- try(build_catalog_map(), silent = TRUE)
-        if (!inherits(mp, "try-error") && is.list(mp) && length(mp)) {
-          rv_map(mp)
-          append_log("[catalog] map loaded via Loader: ", length(mp), " field(s)")
-          showNotification(sprintf("Catalog map loaded from Loader (%d fields).", length(mp)), type = "message")
-          return(invisible())
-        }
-        append_log("[catalog] Loader map unavailable; moving to RelCatalog.xlsx")
+      loader <- input$loader_path
+      accdb  <- normalizePath(input$accdb_path, winslash = "/", mustWork = FALSE)
+      relx   <- normalizePath(input$relcatalog_xlsx, winslash = "/", mustWork = FALSE)
+      rels   <- input$relcatalog_sheet %||% "RelCatalog"
+      
+      append_log(sprintf("[catalog][loader] path='%s' exists=%s", loader, file.exists(loader)))
+      append_log(sprintf("[catalog][loader] getwd()=%s", getwd()))
+      validate(need(isTruthy(loader) && file.exists(loader), "Loader file not found. Set 'Loader file (.R)'."))
+      
+      # Seed globals/options the loader/profiler often rely on
+      assign("relcatalog_xlsx",  relx, envir = .GlobalEnv)
+      assign("relcatalog_sheet", rels, envir = .GlobalEnv)
+      assign("accdb_path",       accdb, envir = .GlobalEnv)
+      options(somec.relcatalog_xlsx = relx,
+              somec.relcatalog_sheet = rels,
+              somec.accdb_path = accdb)
+      
+      # Source from the loader's directory
+      loader_abs <- normalizePath(loader, winslash = "/", mustWork = TRUE)
+      loader_dir <- dirname(loader_abs)
+      append_log(sprintf("[catalog][loader] chdir to %s", loader_dir))
+      
+      owd <- setwd(loader_dir); on.exit(setwd(owd), add = TRUE)
+      withCallingHandlers({
+        source(basename(loader_abs), local = FALSE, chdir = FALSE)
+      },
+      message = function(m) append_log("[loader][msg] ", conditionMessage(m)),
+      warning = function(w) append_log("[loader][wrn] ", conditionMessage(w)))
+      
+      validate(need(exists("build_catalog_map"),
+                    "Loader did not define build_catalog_map(). Check loader_path points to the loader, not the profiler."))
+      
+      mp <- try(build_catalog_map(), silent = TRUE)
+      if (inherits(mp, "try-error") || !is.list(mp) || !length(mp)) {
+        append_log("[catalog][loader][ERROR] build_catalog_map() failed.")
+        stop("build_catalog_map() failed; see Probe log for details.")
       }
       
-      # Read RelCatalog.xlsx
-      path  <- input$relcatalog_xlsx
-      sheet <- input$relcatalog_sheet %||% "RelCatalog"
-      if (!isTruthy(path) || !file.exists(path)) {
-        append_log("[catalog][ERROR] RelCatalog path not found: ", path)
-        showNotification("RelCatalog path is empty or not found.", type = "error")
-        return(invisible())
-      }
-      rc <- try(openxlsx::read.xlsx(path, sheet = sheet), silent = TRUE)
-      if (inherits(rc, "try-error") || !is.data.frame(rc) || !nrow(rc)) {
-        append_log("[catalog][ERROR] Cannot read RelCatalog sheet: ", sheet)
-        showNotification(sprintf("Cannot read RelCatalog sheet: %s", sheet), type = "error")
-        return(invisible())
-      }
-      
-      nms <- tolower(names(rc))
-      # Your relationships schema
-      if (!all(c("object","columnname","refobject","refcolumn") %in% nms)) {
-        append_log("[catalog][ERROR] RelCatalog sheet is not relationships schema (needs Object/ColumnName/RefObject/RefColumn)")
-        showNotification("RelCatalog sheet must have Object/ColumnName/RefObject/RefColumn.", type = "error")
-        return(invisible())
-      }
-      
-      # Open ACCDB once
-      con <- open_access_con_local(input$accdb_path)
-      if (is.null(con)) {
-        append_log("[catalog][ERROR] Cannot open ACCDB to resolve relationships.")
-        showNotification("Cannot open ACCDB to resolve relationships.", type = "error")
-        return(invisible())
-      }
-      on.exit(RODBC::odbcClose(con), add = TRUE)
-      
-      # Pre-scan table names once
-      tdf <- try(RODBC::sqlTables(con), silent = TRUE)
-      if (inherits(tdf, "try-error") || is.null(tdf)) {
-        append_log("[catalog][ERROR] ACCDB sqlTables() failed.")
-        showNotification("ACCDB metadata read failed.", type = "error")
-        return(invisible())
-      }
-      tnames <- unique(as.character(tdf$TABLE_NAME))
-      tmap   <- setNames(tnames, tolower(tnames))
-      
-      # Normalize RelCatalog; drop empties; cache each RefObject once
-      rc2 <- rc
-      names(rc2) <- tolower(names(rc2))
-      rc2[] <- lapply(rc2, function(v) trimws(as.character(v)))
-      rc2 <- unique(rc2[Reduce(`&`, lapply(rc2, nzchar)), , drop = FALSE])
-      robjs <- sort(unique(tolower(rc2$refobject)))
-      
-      # Progress over unique RefObjects
-      mp <- list()
-      withProgress(message = "Resolving catalog relationships…", value = 0, {
-        n <- length(robjs)
-        cache <- vector("list", n); names(cache) <- robjs
-        
-        for (k in seq_along(robjs)) {
-          ro <- robjs[k]
-          incProgress(k / max(1, n), detail = sprintf("Reading %s…", ro))
-          cache[[ro]] <- sql_fetch_ci_local(con, ro, tmap = tmap)
-        }
-        
-        # Build the map
-        for (i in seq_len(nrow(rc2))) {
-          obj  <- rc2$object[i]
-          col  <- rc2$columnname[i]
-          robj <- tolower(rc2$refobject[i])
-          rcol <- rc2$refcolumn[i]
-          
-          df <- cache[[robj]]
-          if (is.null(df)) next
-          vec <- pick_col_ci_local(df, rcol)
-          if (is.null(vec)) next
-          
-          key  <- paste0(tolower(obj), "$", tolower(col))
-          vals <- unique(as.character(vec)); vals <- vals[nzchar(vals)]
-          if (!length(vals)) next
-          
-          if (is.null(mp[[key]])) mp[[key]] <- vals else mp[[key]] <- unique(c(mp[[key]], vals))
-        }
-      })
-      
-      if (!length(mp)) {
-        append_log("[catalog][warn] Relationship map resolved to 0 field(s).")
-        showNotification("RelCatalog resolved to 0 fields.", type = "warning")
-        return(invisible())
-      }
-      
+      # Save both raw and normalized maps
       rv_map(mp)
-      append_log("[catalog] map built from relationships: ", length(mp), " field(s)")
-      showNotification(sprintf("Catalog map loaded (%d fields).", length(mp)), type = "message")
+      rv_map_norm(build_normalized_map(mp))
+      
+      showNotification(sprintf("Catalog map loaded from loader (%d fields).", length(mp)), type = "message")
+      append_log(sprintf("[catalog][loader] OK. %d fields. Example keys: %s",
+                         length(mp), paste(head(names(mp), 5), collapse = ", ")))
       
     }, error = function(e) {
-      append_log("[catalog][ERROR] ", conditionMessage(e))
-      showNotification(conditionMessage(e), type = "error")
+      append_log("[catalog][ERROR] loader path build failed: ", conditionMessage(e))
+      showNotification(paste("Loader build failed:", conditionMessage(e)), type = "error")
     })
   }, ignoreInit = TRUE)
-
-  
   
   output$var_label <- renderText({
     if (!supports_variable_view(input$sheet)) return("")
