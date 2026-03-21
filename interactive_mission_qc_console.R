@@ -21,9 +21,18 @@ suppressPackageStartupMessages({
 # Always resolve paths relative to this script's location (repo root),
 # regardless of the working directory on any platform.
 .repo_root <- tryCatch(
-  dirname(normalizePath(sys.frames()[[1]]$ofile, mustWork = TRUE)),
-  error = function(e) getwd()  # fallback when run interactively line-by-line
-)
+  # Works when script is sourced via source()
+  frames <- sys.frames()
+  ofiles <- Filter(Negate(is.null), lapply(frames, function(f) f$ofile))
+  if (length(ofiles) > 0) {
+    dirname(normalizePath(ofiles[[1]], mustWork = TRUE))
+  } else {
+    # Fallback for RStudio/Positron interactive use
+    dirname(normalizePath(
+      rstudioapi::getSourceEditorContext()$path, mustWork = TRUE
+    ))
+  }
+}, error = function(e) getwd())
 
 # Folder structure (same on Windows and Mac):
 #   SOMEC/
