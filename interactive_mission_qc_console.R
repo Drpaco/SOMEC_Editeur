@@ -21,37 +21,38 @@ suppressPackageStartupMessages({
 # Always resolve paths relative to this script's location (repo root),
 # regardless of the working directory on any platform.
 .repo_root <- tryCatch({
-  # Works when script is sourced via source()
   frames <- sys.frames()
   ofiles <- Filter(Negate(is.null), lapply(frames, function(f) f$ofile))
   if (length(ofiles) > 0) {
     dirname(normalizePath(ofiles[[1]], mustWork = TRUE))
   } else {
-    # Fallback for RStudio/Positron interactive use
     dirname(normalizePath(
       rstudioapi::getSourceEditorContext()$path, mustWork = TRUE
     ))
   }
 }, error = function(e) getwd())
 
-# Folder structure (same on Windows and Mac):
-#   SOMEC/
-#   ├── BaseDeDonnees/           <- .accdb lives here
-#   └── GestionDeDonnees/
-#       ├── GlobalContext/       <- context files
-#       ├── MissionReports/
-#       └── SOMEC_Editeur/       <- THIS repo (.repo_root)
-#           └── _cache/          <- .rds cache (committed to git)
-
-.gestion_root       <- dirname(.repo_root)                          # GestionDeDonnees/
-.somec_root         <- dirname(.gestion_root)                       # SOMEC/
-.cache_dir          <- file.path(.repo_root, "_cache")
+# Folder structure (identical on all platforms — everything is in the repo):
+#   SOMEC_Editeur/               <- THIS repo (.repo_root)
+#   ├── GlobalContext/
+#   │   ├── _cache/              <- missions/transects/observations.rds
+#   │   └── global_context.rds
+#   ├── MissionReports/
+#   │   └── mission_issues.rds
+#   ├── RelCatalog.xlsx
+#   └── interactive_mission_qc_console.R
+#
+# On Windows only: .accdb is outside the repo at:
+#   SOMEC/GestionDeDonnees/BaseDeDonnees/SOMEC_YYYYMMDD.accdb
 
 cfg <- list(
-  accdb_path          = file.path(.somec_root, "BaseDeDonnees", "SOMEC_20251106.accdb"),
-  context_dir         = file.path(.gestion_root, "GlobalContext"),
-  mission_reports_dir = file.path(.gestion_root, "MissionReports"),
-  cache_dir           = .cache_dir
+  accdb_path          = if (.Platform$OS.type == "windows")
+                          file.path(dirname(dirname(.repo_root)), "BaseDeDonnees", "SOMEC_20251106.accdb")
+                        else
+                          NULL,
+  context_dir         = file.path(.repo_root, "GlobalContext"),
+  mission_reports_dir = file.path(.repo_root, "MissionReports"),
+  cache_dir           = file.path(.repo_root, "GlobalContext", "_cache")
 )
 
 dir.create(cfg$cache_dir, showWarnings = FALSE, recursive = TRUE)
