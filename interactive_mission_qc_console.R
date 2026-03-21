@@ -1,10 +1,3 @@
-
-# FILE: interactive_mission_qc_console.R
-# PURPOSE:
-#   Interactive console-based QA reviewer
-#   - Categorical, datetime, and numeric QA
-#   - Read-only: explains issues and PRINTS fix suggestions
-#   - Optionally appends approved fixes to apply_qc_fixes_<version>.R
 # ============================================================
 
 suppressPackageStartupMessages({
@@ -13,6 +6,7 @@ suppressPackageStartupMessages({
   library(janitor)
   library(RODBC)
   library(stringdist)
+  library(base64enc)
 })
 
 # ============================================================
@@ -284,13 +278,15 @@ show_rows <- function(df, col) {
   id_cols    <- intersect(c("mission", "id_transect", "id", "date", "heure", "site"), names(df))
   id_cols    <- setdiff(id_cols, col)
   other_cols <- setdiff(names(df), c(col, id_cols))
-  df |>
+  df_show <- df |>
     select(all_of(c(col, id_cols, other_cols))) |>
-    as_tibble() |>
-    print(n = Inf)
+    as_tibble()
+  print(df_show, n = Inf)
+  invisible(df_show)
 }
 
 # Show flagged rows with n_context rows before and after each flagged row for context
+# Returns the df_show tibble invisibly so callers can pass it to view_in_viewer()
 show_rows_with_context <- function(df, col, flag_idx, n_context = 2) {
   n <- nrow(df)
   context_idx <- unique(unlist(lapply(flag_idx, function(i) {
@@ -309,6 +305,68 @@ show_rows_with_context <- function(df, col, flag_idx, n_context = 2) {
            .before = 1)
 
   print(df_show, n = Inf)
+  invisible(df_show)
+}
+
+# Open plot + optional table together in the Viewer pane as a single HTML file
+# (avoids the plot overwriting the table since both use rstudioapi::viewer)
+view_in_viewer <- function(df = NULL, title = "QC Table", plot_file = NULL) {
+  tmp <- file.path(tempdir(), "qc_viewer.html")
+
+  # --- Plot section (embed PNG as base64) ---
+  plot_html <- ""
+  if (!is.null(plot_file) && file.exists(plot_file)) {
+    b64 <- base64enc::base64encode(plot_file)
+    plot_html <- paste0(
+      "<div style='text-align:center;margin-bottom:12px;'>",
+      "<img src='data:image/png;base64,", b64,
+      "' style='max-width:400px;border:1px solid #ddd;border-radius:4px;'/>",
+      "</div>"
+    )
+  }
+
+  # --- Table section ---
+  table_html <- ""
+  if (!is.null(df) && nrow(df) > 0) {
+    th <- paste0("<th>", names(df), "</th>", collapse = "")
+    flag_col <- if (".flag" %in% names(df)) which(names(df) == ".flag") else NULL
+
+    html_rows <- vapply(seq_len(nrow(df)), function(i) {
+      is_flagged <- !is.null(flag_col) &&
+        identical(as.character(df[[flag_col]][i]), "<<")
+      row_style <- if (is_flagged) ' style="background:#fff3cd;"' else ""
+      cells <- paste0("<td>", vapply(df[i, ], function(v)
+        ifelse(is.na(v), "<span style='color:#aaa'>NA</span>", as.character(v)),
+        character(1)), "</td>", collapse = "")
+      paste0("<tr", row_style, ">", cells, "</tr>")
+    }, character(1))
+
+    table_html <- paste0(
+      "<h4 style='margin:8px 0 4px;'>", title, " (", nrow(df), " rows)</h4>",
+      "<div style='overflow-x:auto;'>",
+      "<table><thead><tr>", th, "</tr></thead><tbody>",
+      paste(html_rows, collapse = "\n"),
+      "</tbody></table></div>"
+    )
+  }
+
+  html <- paste0(
+    "<!DOCTYPE html><html><head><meta charset='UTF-8'><style>",
+    "body{font-family:monospace;font-size:12px;margin:8px;}",
+    "table{border-collapse:collapse;width:100%;white-space:nowrap;}",
+    "th{background:#4472C4;color:white;padding:4px 8px;text-align:left;",
+    "position:sticky;top:0;}",
+    "td{padding:3px 8px;border-bottom:1px solid #ddd;}",
+    "tr:hover{background:#f0f0f0;}",
+    "</style></head><body>",
+    plot_html,
+    table_html,
+    "</body></html>"
+  )
+
+  writeLines(html, tmp, useBytes = TRUE)
+  rstudioapi::viewer(tmp)
+  invisible(NULL)
 }
 
 # Show all rows for a selected date
@@ -331,7 +389,8 @@ show_rows_for_day <- function(df, col, date_col = "date") {
   day_rows <- df[as.Date(df[[date_col]]) == selected_date, ]
   cat(sprintf("\n%s %s (%d %s):\n",
       msg("all_rows_day"), selected_date, nrow(day_rows), msg("rows_label")))
-  show_rows(day_rows, col)
+  df_shown <- show_rows(day_rows, col)
+  view_in_viewer(df = df_shown, title = paste0(col, " — ", selected_date))
 }
 
 generate_recode_snippet <- function(table, col, map) {
@@ -493,95 +552,131 @@ explain_issue <- function(issue_row, mission_id) {
 
     x    <- suppressWarnings(as.numeric(df_mis[[col]]))
     n_na <- sum(is.na(x))
+    df_na  <- NULL
+    df_out <- NULL
 
     cat(msg("miss_num_dist"), "\n")
-    cat(msg("n_label"),      sum(!is.na(x)), "\n")
+    cat(msg("n_label"),       sum(!is.na(x)), "\n")
     cat(msg("missing_label"), n_na, "\n")
-    cat(msg("min_label"),    min(x, na.rm = TRUE), "\n")
-    cat(msg("median_label"), median(x, na.rm = TRUE), "\n")
-    cat(msg("max_label"),    max(x, na.rm = TRUE), "\n\n")
+    cat(msg("min_label"),     min(x, na.rm = TRUE), "\n")
+    cat(msg("median_label"),  median(x, na.rm = TRUE), "\n")
+    cat(msg("max_label"),     max(x, na.rm = TRUE), "\n\n")
 
     if (n_na > 0) {
       cat(msg("rows_missing"), "\n")
       na_idx <- which(is.na(x))
-      show_rows_with_context(df_mis, col, na_idx)
+      df_na  <- show_rows_with_context(df_mis, col, na_idx)
       cat("\n")
+      view_in_viewer(df_na, title = paste0(col, " — NA rows"))
     }
 
     gb <- get_global_numeric_baseline(global_ctx, tbl, col)
 
-    if (nrow(gb) == 0) {
-      cat("⚠️ ", msg("no_baseline"), "\n")
-      return(invisible(NULL))
-    }
+    # FIX 6: always build and show the plot, even with no outliers/NAs
+    if (nrow(gb) > 0) {
 
-    cat(msg("global_ctx"), "\n")
-    cat("  p05 :", gb$p05, "\n")
-    cat("  p50 :", gb$p50, "\n")
-    cat("  p95 :", gb$p95, "\n\n")
+      outliers <- x < gb$p05 | x > gb$p95
 
-    outliers <- x < gb$p05 | x > gb$p95
+      cat(msg("global_ctx"), "\n")
+      cat("  p05 :", gb$p05, "\n")
+      cat("  p50 :", gb$p50, "\n")
+      cat("  p95 :", gb$p95, "\n\n")
 
-    cat(msg("outliers_label"), "\n")
-    cat(msg("n_outliers"), sum(outliers, na.rm = TRUE), "\n")
+      cat(msg("outliers_label"), "\n")
+      cat(msg("n_outliers"), sum(outliers, na.rm = TRUE), "\n")
 
-    if (any(outliers, na.rm = TRUE)) {
-      cat(msg("min_outlier"), min(x[outliers], na.rm = TRUE), "\n")
-      cat(msg("max_outlier"), max(x[outliers], na.rm = TRUE), "\n\n")
+      if (any(outliers, na.rm = TRUE)) {
+        cat(msg("min_outlier"), min(x[outliers], na.rm = TRUE), "\n")
+        cat(msg("max_outlier"), max(x[outliers], na.rm = TRUE), "\n\n")
+        cat(msg("outlier_rows"), "\n")
+        outlier_idx <- which(!is.na(outliers) & outliers)
+        df_out      <- show_rows_with_context(df_mis, col, outlier_idx)
+      }
 
-      cat(msg("outlier_rows"), "\n")
-      outlier_idx <- which(!is.na(outliers) & outliers)
-      show_rows_with_context(df_mis, col, outlier_idx)
+      if (n_na == 0 && sum(outliers, na.rm = TRUE) == 0) {
+        cat("\n⚠️ ", if (.lang == "f")
+          paste0("Aucun problème détecté. Détails du rapport : ", issue_row$details)
+          else
+          paste0("No issues found in data. Report details: ", issue_row$details), "\n\n")
+      }
 
-      snippet <- paste0(
-        tbl, " <- ", tbl, " |>\n",
-        "  mutate(\n",
-        "    ", col, " = ", col, "  ", msg("code_reviewer"), "\n",
-        "  )"
+      # Build plot
+      line_labels <- if (.lang == "f")
+        c("p05 / p95 (global)", "p50 médiane (global)")
+      else
+        c("p05 / p95 (global)", "p50 median (global)")
+
+      plot_df <- tibble(
+        value    = ifelse(is.na(x), gb$p50, x),
+        category = case_when(
+          is.na(x)                  ~ if (.lang == "f") "Manquant (NA)" else "Missing (NA)",
+          coalesce(outliers, FALSE) ~ if (.lang == "f") "Aberrant"      else "Outlier",
+          TRUE                      ~ "Normal"
+        )
       )
+
+      p <- ggplot(plot_df, aes(x = 0, y = value)) +
+        geom_jitter(aes(color = category, shape = category),
+                    width = 0.15, size = 2, alpha = 0.7) +
+        # FIX 2: reference lines added to legend via aes linetype
+        geom_hline(aes(yintercept = gb$p05, linetype = line_labels[1]),
+                   color = "steelblue", linewidth = 0.8) +
+        geom_hline(aes(yintercept = gb$p95, linetype = line_labels[1]),
+                   color = "steelblue", linewidth = 0.8) +
+        geom_hline(aes(yintercept = gb$p50, linetype = line_labels[2]),
+                   color = "grey40", linewidth = 0.6) +
+        scale_color_manual(values = c(
+          "Normal"       = "grey60",
+          "Outlier"      = "firebrick", "Aberrant"      = "firebrick",
+          "Missing (NA)" = "orange",    "Manquant (NA)" = "orange"
+        )) +
+        scale_shape_manual(values = c(
+          "Normal"       = 16,
+          "Outlier"      = 16, "Aberrant"      = 16,
+          "Missing (NA)" = 4,  "Manquant (NA)" = 4
+        )) +
+        scale_linetype_manual(values = c("dashed", "dotted") |> setNames(line_labels)) +
+        labs(
+          title    = paste0(if (.lang == "f") "QC Numérique — " else "Numeric QC — ",
+                            tbl, "$", col),
+          subtitle = paste0(if (.lang == "f") "Mission : " else "Mission: ", mission_id,
+                            "  |  p05=", gb$p05, "  p50=", gb$p50, "  p95=", gb$p95,
+                            "  |  NA=", n_na),
+          y = col, x = NULL, color = NULL, shape = NULL, linetype = NULL
+        ) +
+        theme_minimal() +
+        theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+
+      .plot_file <- file.path(tempdir(), "qc_numeric_plot.png")
+      ggsave(.plot_file, plot = p, width = 4, height = 6, dpi = 120)
+
+    } else {
+      cat("⚠️ ", msg("no_baseline"), "\n")
+      outliers   <- rep(FALSE, length(x))
+      .plot_file <- NULL
     }
 
-    # Plot — shown in Positron viewer pane
-    plot_df <- tibble(value = ifelse(is.na(x), gb$p50, x),
-                      category = case_when(
-                        is.na(x)                    ~ if (.lang == "f") "Manquant (NA)" else "Missing (NA)",
-                        coalesce(outliers, FALSE)    ~ if (.lang == "f") "Aberrant"      else "Outlier",
-                        TRUE                         ~ if (.lang == "f") "Normal"        else "Normal"
-                      ))
+    # Single viewer call — plot + flagged rows together
+    df_viewer <- if (!is.null(df_na) && !is.null(df_out)) bind_rows(df_na, df_out)
+                 else if (!is.null(df_na))  df_na
+                 else if (!is.null(df_out)) df_out
+                 else                       NULL
 
-    p <- ggplot(plot_df, aes(x = 0, y = value)) +
-      geom_jitter(aes(color = category, shape = category), width = 0.15, size = 2, alpha = 0.7) +
-      geom_hline(yintercept = gb$p05, linetype = "dashed", color = "steelblue", linewidth = 0.8) +
-      geom_hline(yintercept = gb$p95, linetype = "dashed", color = "steelblue", linewidth = 0.8) +
-      geom_hline(yintercept = gb$p50, linetype = "dotted", color = "grey40",    linewidth = 0.6) +
-      scale_color_manual(values = c(
-        "Normal" = "grey60", "Outlier" = "firebrick", "Missing (NA)" = "orange",
-        "Normal" = "grey60", "Aberrant" = "firebrick", "Manquant (NA)" = "orange"
-      )) +
-      scale_shape_manual(values = c(
-        "Normal" = 16, "Outlier" = 16, "Missing (NA)" = 4,
-        "Normal" = 16, "Aberrant" = 16, "Manquant (NA)" = 4
-      )) +
-      labs(
-        title    = paste0(if (.lang == "f") "QC Numérique — " else "Numeric QC — ", tbl, "$", col),
-        subtitle = paste0(if (.lang == "f") "Mission : " else "Mission: ", mission_id,
-                          "  |  p05=", gb$p05, "  p50=", gb$p50, "  p95=", gb$p95,
-                          "  |  NA=", n_na),
-        y = col, x = NULL, color = NULL, shape = NULL
-      ) +
-      theme_minimal() +
-      theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
-
-    .plot_file <- file.path(tempdir(), "qc_numeric_plot.png")
-    ggsave(.plot_file, plot = p, width = 4, height = 6, dpi = 120)
-    rstudioapi::viewer(.plot_file)
+    view_in_viewer(
+      df        = df_viewer,
+      title     = paste0(tbl, "$", col),
+      plot_file = if (exists(".plot_file")) .plot_file else NULL
+    )
 
     cat("\n", msg("qa_actions"), "\n")
-    cat(msg("qa_units"), gb$p50, ")\n")
+    cat(msg("qa_units"), if (nrow(gb) > 0) gb$p50 else "N/A", ")\n")
     cat(msg("qa_source"), "\n")
     cat(msg("qa_cap"), "\n\n")
 
-    # Interactive NA fix menu
+    # FIX 1: only offer NA fix menu when there are actual NAs
+    na_snippet      <- NULL
+    outlier_snippet <- NULL
+
     if (n_na > 0) {
       mis_mean   <- round(mean(x, na.rm = TRUE), 4)
       mis_median <- round(median(x, na.rm = TRUE), 4)
@@ -595,13 +690,14 @@ explain_issue <- function(issue_row, mission_id) {
 
       na_choice <- prompt(msg("na_prompt"), c("1", "2", "3", "4", ""))
 
-      snippet <- if (na_choice == "1") {
+      na_snippet <- if (na_choice == "1") {
         paste0(msg("code_leave_na"), " ", col, " NA — ", msg("code_no_change"), "\n")
       } else if (na_choice == "2") {
         paste0(
           tbl, " <- ", tbl, " |>\n",
           "  mutate(\n",
-          "    ", col, " = if_else(mission == \"", mission_id, "\" & is.na(", col, "),\n",
+          "    ", col, " = if_else(mission == \"", mission_id,
+          "\" & is.na(", col, "),\n",
           "      ", mis_mean, ", ", col, ")\n",
           "  )"
         )
@@ -609,31 +705,52 @@ explain_issue <- function(issue_row, mission_id) {
         paste0(
           tbl, " <- ", tbl, " |>\n",
           "  mutate(\n",
-          "    ", col, " = if_else(mission == \"", mission_id, "\" & is.na(", col, "),\n",
+          "    ", col, " = if_else(mission == \"", mission_id,
+          "\" & is.na(", col, "),\n",
           "      ", mis_median, ", ", col, ")\n",
           "  )"
         )
       } else if (na_choice == "4") {
         custom <- readline(paste0(msg("na_custom_prompt"), " ", col, ": "))
-        custom <- trimws(custom)
         paste0(
           tbl, " <- ", tbl, " |>\n",
           "  mutate(\n",
-          "    ", col, " = if_else(mission == \"", mission_id, "\" & is.na(", col, "),\n",
-          "      ", custom, ", ", col, ")\n",
+          "    ", col, " = if_else(mission == \"", mission_id,
+          "\" & is.na(", col, "),\n",
+          "      ", trimws(custom), ", ", col, ")\n",
           "  )"
         )
       } else {
-        NULL  # skip
+        NULL
       }
 
-      if (!is.null(snippet)) {
+      if (!is.null(na_snippet)) {
         cat("\n", msg("generated_fix"), "\n\n")
-        cat(snippet, "\n")
+        cat(na_snippet, "\n")
       }
-    } else if (!is.null(snippet)) {
+    }
+
+    # FIX 1: only offer outlier template when there are actual outliers
+    if (any(outliers, na.rm = TRUE)) {
+      outlier_snippet <- paste0(
+        tbl, " <- ", tbl, " |>\n",
+        "  mutate(\n",
+        "    ", col, " = ", col, "  ", msg("code_reviewer"), "\n",
+        "  )"
+      )
       cat(msg("template_label"), "\n\n")
-      cat(snippet, "\n")
+      cat(outlier_snippet, "\n")
+    }
+
+    # FIX 4: combine NA and outlier snippets if both exist
+    snippet <- if (!is.null(na_snippet) && !is.null(outlier_snippet)) {
+      paste0(na_snippet, "\n\n", outlier_snippet)
+    } else if (!is.null(na_snippet)) {
+      na_snippet
+    } else if (!is.null(outlier_snippet)) {
+      outlier_snippet
+    } else {
+      NULL   # FIX 1: nothing to add
     }
 
     return(invisible(snippet))
@@ -720,27 +837,27 @@ explain_issue <- function(issue_row, mission_id) {
 
 run_interactive_qc <- function() {
 
-  for (mis in unique(mission_issues$mission)) {
+  missions_list <- unique(mission_issues$mission)
+
+  for (m_idx in seq_along(missions_list)) {
+
+    mis    <- missions_list[m_idx]
+    issues <- mission_issues |> filter(mission == mis)
 
     cat("\n================================================\n")
     cat(msg("mission_label"), mis, "\n")
     cat("================================================\n")
 
-    issues <- mission_issues |> filter(mission == mis)
-
     for (j in seq_len(nrow(issues))) {
 
       issue <- issues[j, ]
 
-      # Count missing values for this variable in this mission
       df_mis <- get(issue$table) |> filter(mission == mis)
       n_na   <- sum(is.na(df_mis[[issue$column]]))
       na_tag <- if (n_na > 0) paste0("  [", n_na, " NA]") else ""
 
-      cat(sprintf(
-        "\n[%d] %s — %s$%s%s\n",
-        j, issue$issue_type, issue$table, issue$column, na_tag
-      ))
+      cat(sprintf("\n[%d/%d] %s — %s$%s%s\n",
+          j, nrow(issues), issue$issue_type, issue$table, issue$column, na_tag))
 
       choice <- prompt(msg("opt_view"), c("v", "s", "n", "q"))
 
@@ -769,6 +886,19 @@ run_interactive_qc <- function() {
 
       if (choice == "n") break
       if (choice == "q") return(invisible(NULL))
+    }
+
+    # FIX 5: after last issue of a mission, ask before moving on
+    if (m_idx < length(missions_list)) {
+      next_mis <- missions_list[m_idx + 1]
+      go_next  <- prompt(
+        if (.lang == "f")
+          paste0("\n✅  Mission ", mis, " terminée. Passer à ", next_mis, " ? [o]ui / [q]uitter > ")
+        else
+          paste0("\n✅  Mission ", mis, " done. Go to ", next_mis, "? [y]es / [q]uit > "),
+        if (.lang == "f") c("o", "q") else c("y", "q")
+      )
+      if (go_next == "q") return(invisible(NULL))
     }
   }
 
