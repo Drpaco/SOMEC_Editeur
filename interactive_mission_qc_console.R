@@ -20,30 +20,30 @@ suppressPackageStartupMessages({
 
 # Always resolve paths relative to this script's location (repo root),
 # regardless of the working directory on any platform.
-.repo_root  <- tryCatch(
+.repo_root <- tryCatch(
   dirname(normalizePath(sys.frames()[[1]]$ofile, mustWork = TRUE)),
   error = function(e) getwd()  # fallback when run interactively line-by-line
 )
 
-# SOMEC/ is a sibling of SOMEC_Editeur/ inside ShinyApps/
-.somec_root <- file.path(dirname(.repo_root), "SOMEC")
-.cache_dir  <- file.path(.repo_root, "_cache")
+# Folder structure (same on Windows and Mac):
+#   SOMEC/
+#   ├── BaseDeDonnees/           <- .accdb lives here
+#   └── GestionDeDonnees/
+#       ├── GlobalContext/       <- context files
+#       ├── MissionReports/
+#       └── SOMEC_Editeur/       <- THIS repo (.repo_root)
+#           └── _cache/          <- .rds cache (committed to git)
 
-if (.Platform$OS.type == "windows") {
-  cfg <- list(
-    accdb_path          = file.path(.somec_root, "BaseDeDonnees", "SOMEC_20251106.accdb"),
-    context_dir         = file.path(.somec_root, "GestionDeDonnees", "GlobalContext"),
-    mission_reports_dir = file.path(.somec_root, "GestionDeDonnees", "MissionReports"),
-    cache_dir           = .cache_dir
-  )
-} else {
-  cfg <- list(
-    accdb_path          = NULL,   # not accessible on macOS
-    context_dir         = .cache_dir,
-    mission_reports_dir = .cache_dir,
-    cache_dir           = .cache_dir
-  )
-}
+.gestion_root       <- dirname(.repo_root)                          # GestionDeDonnees/
+.somec_root         <- dirname(.gestion_root)                       # SOMEC/
+.cache_dir          <- file.path(.repo_root, "_cache")
+
+cfg <- list(
+  accdb_path          = file.path(.somec_root, "BaseDeDonnees", "SOMEC_20251106.accdb"),
+  context_dir         = file.path(.gestion_root, "GlobalContext"),
+  mission_reports_dir = file.path(.gestion_root, "MissionReports"),
+  cache_dir           = .cache_dir
+)
 
 dir.create(cfg$cache_dir, showWarnings = FALSE, recursive = TRUE)
 
