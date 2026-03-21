@@ -53,26 +53,43 @@ dir.create(cfg$cache_dir, showWarnings = FALSE, recursive = TRUE)
 
 load_access_table_cached <- function(accdb_path, table_name, cache_dir) {
   cache_file <- file.path(cache_dir, paste0(table_name, ".rds"))
-  if (file.exists(cache_file) &&
-      file.info(cache_file)$mtime >= file.info(accdb_path)$mtime) {
+
+  cache_exists <- file.exists(cache_file)
+  accdb_exists <- !is.null(accdb_path) && file.exists(accdb_path)
+
+  # Use cache if it exists and is at least as recent as the .accdb
+  if (cache_exists && accdb_exists) {
+    cache_mtime <- file.info(cache_file)$mtime
+    accdb_mtime <- file.info(accdb_path)$mtime
+    if (!is.na(cache_mtime) && !is.na(accdb_mtime) && cache_mtime >= accdb_mtime) {
+      return(readRDS(cache_file))
+    }
+  }
+
+  # Use cache if .accdb is not accessible (macOS or path wrong)
+  if (cache_exists && !accdb_exists) {
+    message("⚠️  '", basename(accdb_path %||% "accdb"), "' not found. Loading cached version of '", table_name, "'.")
     return(readRDS(cache_file))
   }
-  if (file.exists(cache_file)) {
-    message("⚠️  Cache may be stale (can't check .accdb on this platform). Loading cached version.")
-    return(readRDS(cache_file))
-  }
-  if (!exists("odbcConnectAccess2007", where = asNamespace("RODBC"), inherits = FALSE)) {
+
+  # No cache and no .accdb — cannot proceed
+  if (!accdb_exists) {
     stop(
-      "No cache found for '", table_name, "' and odbcConnectAccess2007 is not available ",
-      "on this platform (macOS).\n",
-      "Run the export script on Windows first to generate the .rds cache files, ",
-      "then copy them to:\n  ", cache_dir
+      "No cache found for '", table_name, "' and the .accdb is not accessible.\n",
+      "Expected .accdb at: ", accdb_path, "\n",
+      "Run the script on Windows to generate the .rds cache files."
     )
+  }
+
+  # .accdb is accessible — read and cache
+  if (!exists("odbcConnectAccess2007", where = asNamespace("RODBC"), inherits = FALSE)) {
+    stop("odbcConnectAccess2007 is not available on this platform (macOS).")
   }
   con <- RODBC::odbcConnectAccess2007(accdb_path, believeNRows = FALSE)
   on.exit(RODBC::odbcClose(con), add = TRUE)
-  df <- RODBC::sqlFetch(con, table_name)
+  df <- RODBC::sqlFetch(con, table_name) |> clean_names()
   saveRDS(df, cache_file)
+  message("✅  Cached '", table_name, "' to ", cache_file)
   df
 }
 
