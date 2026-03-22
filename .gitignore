@@ -1,0 +1,11 @@
+# Mac
+.DS_Store
+
+# Temp files
+tmp/
+*.tmp
+
+# R session
+.Rhistory
+.RData
+.Rproj.user/

@@ -30,7 +30,7 @@ run_cross_validation <- function(mission_id) {
 
   obs_mis <- observations |>
     as_tibble() |>
-    filter(mission == mission_id) |>
+    filter(.data[["mission"]] == mission_id) |>
     normalize_obs()
 
   is_both_mission <- mission_id %in% .rad_par_both_missions
@@ -154,6 +154,49 @@ explain_cv_rule <- function(rule, df_violations, mission_id) {
                                 .cv_rule_desc[[rule]][[.lang]]))
 
   snippet <- NULL
+
+  # R4: offer dis_par <- dis_rad fix when dis_par is missing but dis_rad exists
+  if (rule == "R4") {
+    obs_mis_raw <- observations |>
+      as_tibble() |>
+      filter(.data[["mission"]] == mission_id) |>
+      normalize_obs()
+
+    has_rad_no_par <- obs_mis_raw |>
+      filter(espece_n != "RIEN",
+             !is.na(tra_rad) | !is.na(dis_rad),
+             is.na(tra_par) & is.na(dis_par))
+
+    if (nrow(has_rad_no_par) > 0) {
+      cat(if (.lang == "f")
+        paste0("  ", nrow(has_rad_no_par),
+               " lignes ont des valeurs _rad mais pas de valeurs _par.\n")
+      else
+        paste0("  ", nrow(has_rad_no_par),
+               " rows have _rad values but no _par values.\n"))
+
+      snippet <- paste0(
+        "# R4 fix: copy _rad into _par where _par is missing, then clear _rad\n",
+        "observations <- observations |>\n",
+        "  mutate(\n",
+        "    tra_par = if_else(mission == \"", mission_id, "\" &\n",
+        "      (is.na(tra_par) & is.na(dis_par)) &\n",
+        "      (!is.na(tra_rad) | !is.na(dis_rad)),\n",
+        "      tra_rad, tra_par),\n",
+        "    dis_par = if_else(mission == \"", mission_id, "\" &\n",
+        "      (is.na(tra_par) & is.na(dis_par)) &\n",
+        "      (!is.na(tra_rad) | !is.na(dis_rad)),\n",
+        "      dis_rad, dis_par),\n",
+        "    tra_rad = if_else(mission == \"", mission_id, "\" &\n",
+        "      !is.na(tra_par), NA_real_, tra_rad),\n",
+        "    dis_rad = if_else(mission == \"", mission_id, "\" &\n",
+        "      !is.na(dis_par), NA_real_, dis_rad)\n",
+        "  )"
+      )
+      cat(if (.lang == "f") "CORRECTION SUGGEREE:\n\n" else "SUGGESTED FIX:\n\n")
+      cat(snippet, "\n")
+    }
+  }
 
   # R6: show global VOL/snapshot pattern + suggest fix
   if (rule == "R6") {
