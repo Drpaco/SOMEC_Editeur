@@ -8,11 +8,50 @@ suppressPackageStartupMessages({
 })
 
 # ============================================================
-# LANGUAGE
+# ENVIRONMENT CHECK
 # ============================================================
 
-cat("Language / Langue: [e] English  [f] Français > ")
-.lang <- tolower(trimws(readline()))
+# readline() does not work when a script is sourced in RStudio.
+# This script must be run line-by-line (Ctrl+Enter) or via
+# Positron where readline() is fully interactive.
+.in_rstudio <- identical(Sys.getenv("RSTUDIO"), "1")
+.is_sourced <- sys.nframe() > 0
+
+if (.in_rstudio && .is_sourced) {
+  stop(
+    "\n\nThis script cannot be sourced in RStudio because readline() does not\n",
+    "accept input during source(). Please either:\n",
+    "  1. Run it line-by-line in RStudio (select all + Ctrl+Enter), or\n",
+    "  2. Use Positron, where source() and readline() work together.\n",
+    call. = FALSE
+  )
+}
+
+# ============================================================
+# LANGUAGE
+# ============================================================
+# R
+select_language <- function() {
+  if (interactive() && requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::hasFun("showPrompt")) {
+    ans <- tryCatch(rstudioapi::showPrompt("Language", "Language / Langue: [e] English  [f] Français", default = "e"),
+                    error = function(e) NA_character_)
+    .lang <<- if (!is.na(ans)) tolower(trimws(ans)) else "e"
+  } else if (interactive()) {
+    cat("Language / Langue: [e] English  [f] Français > ")
+    .lang <<- tolower(trimws(readline()))
+  } else {
+    .lang <<- "e"
+  }
+  if (!.lang %in% c("e","f")) .lang <<- "e"
+}
+select_language()
+
+if (interactive()) {
+  cat("Language / Langue: [e] English  [f] Français > ")
+  .lang <- tolower(trimws(readline()))
+} else {
+  .lang <- "e"
+}
 if (!.lang %in% c("e", "f")) .lang <- "e"
 
 .strings <- list(
@@ -83,8 +122,13 @@ if (!.lang %in% c("e", "f")) .lang <- "e"
   code_leave_na    = c(e = "# Leave",                         f = "# Laisser"),
   code_no_change   = c(e = "# no change needed",              f = "# aucun changement nécessaire")
 )
-
-msg <- function(key) .strings[[key]][[.lang]]
+msg <- function(key) {
+  entry <- .strings[[key]]
+  if (is.null(entry)) stop("Unknown i18n key: ", key)
+  lang <- tryCatch(get(".lang", envir = .GlobalEnv), error = function(e) "e")
+  if (!lang %in% c("e", "f")) lang <- "e"
+  entry[[lang]]
+}
 
 # ============================================================
 # CONFIG

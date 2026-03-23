@@ -14,12 +14,12 @@ suppressPackageStartupMessages({
 })
 
 cfg <- list(
-  accdb_path = "C:/Users/BolducF/Documents/ShinyApps/SOMEC/BaseDeDonnees/SOMEC_20251106.accdb",
-  relcatalog_xlsx = "C:/Users/BolducF/Documents/ShinyApps/SOMEC/GestionDeDonnees/RelCatalog.xlsx",
+  accdb_path = "U:/SOMEC/BaseDeDonnees/SOMEC_20251106.accdb",
+  relcatalog_xlsx = "U:/SOMEC/BaseDeDonnees/GestionDeDonnees/SOMEC_Editeur/RelCatalog.xlsx",
   relcatalog_sheet = "RelCatalog",
   
   out_dir = file.path(
-    "C:/Users/BolducF/Documents/ShinyApps/SOMEC/GestionDeDonnees",
+    "U:/SOMEC/BaseDeDonnees/GestionDeDonnees/SOMEC_Editeur",
     "GlobalContext"
   ),
   

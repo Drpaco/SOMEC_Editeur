@@ -14,14 +14,14 @@ suppressPackageStartupMessages({
 
 # ---------------- CONFIG ----------------
 cfg <- list(
-  base_dir = file.path("C:", 'Users','BolducF','Documents','ShinyApps',"SOMEC", "BaseDeDonnees", "GestionDeDonnees"),
+  base_dir = file.path("U:","SOMEC", "BaseDeDonnees", "GestionDeDonnees"),
   out_folder = "MissionReports",
   force_rebuild = FALSE, #TRUE si on a besoin de refaire les fichiers excel
   
   # Paths used by FILE A (loader) — keep in sync with catalog_loader.R
-  relcatalog_xlsx  = "C:/Users/BolducF/Documents/ShinyApps/SOMEC/GestionDeDonnees/RelCatalog.xlsx",
+  relcatalog_xlsx  = "U:/SOMEC/BaseDeDonnees/GestionDeDonnees/SOMEC_Editeur/RelCatalog.xlsx",
   relcatalog_sheet = "RelCatalog",
-  accdb_path       = "C:/Users/BolducF/Documents/ShinyApps/SOMEC/BaseDeDonnees/SOMEC_20251106.accdb",
+  accdb_path       = "U:/SOMEC/BaseDeDonnees/SOMEC_20251106.accdb",
   
   rare_threshold_pct = 0.1,
   max_levels_show = 20,

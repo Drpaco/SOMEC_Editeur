@@ -14,7 +14,7 @@ suppressPackageStartupMessages({
 })
 
 cfg <- list(
-  relcatalog_xlsx  = "U:/SOMEC/BaseDeDonnees/GestionDeDonnees/RelCatalog_YYYYMMDD.xlsx",
+  relcatalog_xlsx  = "U:/SOMEC/BaseDeDonnees/GestionDeDonnees/SOMEC_Editeur/RelCatalog.xlsx",
   relcatalog_sheet = "RelCatalog",
   accdb_path       = "U:/SOMEC/BaseDeDonnees/SOMEC_20251106.accdb"
 )

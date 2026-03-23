@@ -15,10 +15,10 @@ suppressPackageStartupMessages({
 })
 
 # ---------------- CONFIG (EDIT THESE TWO LINES ONLY) ----------------
-relcatalog_xlsx  <- "C:/Users/BolducF/Documents/ShinyApps/SOMEC/GestionDeDonnees/RelCatalog.xlsx"  # <-- update date
+relcatalog_xlsx  <- "U:/SOMEC/BaseDeDonnees/GestionDeDonnees/SOMEC_Editeur/RelCatalog.xlsx"  # <-- update date
 relcatalog_sheet <- "RelCatalog"
 
-accdb_path <- "C:/Users/BolducF/Documents/ShinyApps/SOMEC/BaseDeDonnees/SOMEC_20251106.accdb"
+accdb_path <- "U:/SOMEC/BaseDeDonnees/SOMEC_20251106.accdb"
 # -------------------------------------------------------------------
 
 message("=== Catalog Loader start ===")
