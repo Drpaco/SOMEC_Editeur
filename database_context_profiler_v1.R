@@ -1,29 +1,47 @@
-# ============================================================
-# FILE: database_context_profiler_v1.R
-# PURPOSE:
-#   Build GLOBAL database-wide QC baselines
-#   Independent from mission profiler
-# ============================================================
+﻿project_dir <- tryCatch({
+  frames <- sys.frames()
+  ofiles <- Filter(Negate(is.null), lapply(frames, function(f) f$ofile))
+  if (length(ofiles) > 0) {
+    dirname(normalizePath(ofiles[[1]], mustWork = TRUE))
+  } else {
+    dirname(normalizePath(
+      rstudioapi::getSourceEditorContext()$path, mustWork = TRUE
+    ))
+  }
+}, error = function(e) getwd())
 
-suppressPackageStartupMessages({
-  library(tidyverse)
-  library(lubridate)
-  library(janitor)
-  library(openxlsx)
-  library(RODBC)
-})
+resolve_accdb_path <- function(project_dir) {
+  if (.Platform$OS.type != "windows") return(NULL)
+
+  db_dir <- normalizePath(
+    file.path(dirname(dirname(project_dir)), "BaseDeDonnees"),
+    winslash = "/", mustWork = FALSE
+  )
+
+  env_path <- Sys.getenv("SOMEC_ACCDB_PATH", unset = "")
+  if (nzchar(env_path)) {
+    return(normalizePath(env_path, winslash = "/", mustWork = FALSE))
+  }
+
+  env_suffix <- Sys.getenv("SOMEC_ACCDB_SUFFIX", unset = "")
+  if (nzchar(env_suffix)) {
+    v <- if (grepl("^SOMEC_", env_suffix)) env_suffix else paste0("SOMEC_", env_suffix)
+    return(normalizePath(file.path(db_dir, paste0(v, ".accdb")), winslash = "/", mustWork = FALSE))
+  }
+
+  files <- list.files(db_dir, pattern = "^SOMEC_\\d{8}\\.accdb$", full.names = TRUE)
+  if (!length(files)) return(NULL)
+
+  normalizePath(files[order(file.info(files)$mtime, decreasing = TRUE)][1], winslash = "/", mustWork = FALSE)
+}
 
 cfg <- list(
-  accdb_path = "U:/SOMEC/BaseDeDonnees/SOMEC_20251106.accdb",
-  relcatalog_xlsx = "U:/SOMEC/BaseDeDonnees/GestionDeDonnees/SOMEC_Editeur/RelCatalog.xlsx",
+  accdb_path = resolve_accdb_path(project_dir),
+  relcatalog_xlsx = normalizePath(file.path(project_dir, "RelCatalog.xlsx"), winslash = "/", mustWork = FALSE),
   relcatalog_sheet = "RelCatalog",
   
-  out_dir = file.path(
-    "U:/SOMEC/BaseDeDonnees/GestionDeDonnees/SOMEC_Editeur",
-    "GlobalContext"
-  ),
-  
-  force_rebuild = FALSE,   # <<< ADD THIS LINE
+  out_dir = normalizePath(file.path(project_dir, "GlobalContext"), winslash = "/", mustWork = FALSE),
+  force_rebuild = FALSE,
   
   suspect_pct_global = 1,
   suspect_n_global = 100
@@ -588,5 +606,9 @@ saveWorkbook(
 global_context$catalog_map <- catalog_map
 
 }
+
+
+
+
 
 

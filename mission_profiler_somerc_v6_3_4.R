@@ -1,6 +1,4 @@
-# ============================================================
-# FILE B: mission_profiler_somerc_v6_3_4.R
-# - Sources FILE A (catalog_loader.R) to load catalogs + mapping
+﻿# Sources FILE A (catalog_loader.R) to load catalogs + mapping
 # - Runs mission-by-mission Excel with EXACT catalog matching
 # ============================================================
 
@@ -13,16 +11,55 @@ suppressPackageStartupMessages({
 })
 
 # ---------------- CONFIG ----------------
+project_dir <- tryCatch({
+  frames <- sys.frames()
+  ofiles <- Filter(Negate(is.null), lapply(frames, function(f) f$ofile))
+  if (length(ofiles) > 0) {
+    dirname(normalizePath(ofiles[[1]], mustWork = TRUE))
+  } else {
+    dirname(normalizePath(
+      rstudioapi::getSourceEditorContext()$path, mustWork = TRUE
+    ))
+  }
+}, error = function(e) getwd())
+
+resolve_accdb_path <- function(project_dir) {
+  if (.Platform$OS.type != "windows") return(NULL)
+
+  # project_dir = .../SOMEC/BaseDeDonnees/GestionDeDonnees/SOMEC_Editeur
+  # .accdb files live directly in .../SOMEC/BaseDeDonnees/ (2 levels up)
+  db_dir <- normalizePath(
+    dirname(dirname(project_dir)),
+    winslash = "/", mustWork = FALSE
+  )
+
+  env_path <- Sys.getenv("SOMEC_ACCDB_PATH", unset = "")
+  if (nzchar(env_path)) {
+    return(normalizePath(env_path, winslash = "/", mustWork = FALSE))
+  }
+
+  env_suffix <- Sys.getenv("SOMEC_ACCDB_SUFFIX", unset = "")
+  if (nzchar(env_suffix)) {
+    v <- if (grepl("^SOMEC_", env_suffix)) env_suffix else paste0("SOMEC_", env_suffix)
+    return(normalizePath(file.path(db_dir, paste0(v, ".accdb")), winslash = "/", mustWork = FALSE))
+  }
+
+  files <- list.files(db_dir, pattern = "^SOMEC_\\d{8}\\.accdb$", full.names = TRUE)
+  if (!length(files)) return(NULL)
+
+  normalizePath(files[order(file.info(files)$mtime, decreasing = TRUE)][1], winslash = "/", mustWork = FALSE)
+}
+
 cfg <- list(
-  base_dir = file.path("U:","SOMEC", "BaseDeDonnees", "GestionDeDonnees"),
+  base_dir = project_dir,
   out_folder = "MissionReports",
   force_rebuild = FALSE, #TRUE si on a besoin de refaire les fichiers excel
-  
+
   # Paths used by FILE A (loader) — keep in sync with catalog_loader.R
-  relcatalog_xlsx  = "U:/SOMEC/BaseDeDonnees/GestionDeDonnees/SOMEC_Editeur/RelCatalog.xlsx",
+  relcatalog_xlsx  = normalizePath(file.path(project_dir, "RelCatalog.xlsx"), winslash = "/", mustWork = FALSE),
   relcatalog_sheet = "RelCatalog",
-  accdb_path       = "U:/SOMEC/BaseDeDonnees/SOMEC_20251106.accdb",
-  
+  accdb_path       = resolve_accdb_path(project_dir),
+
   rare_threshold_pct = 0.1,
   max_levels_show = 20,
   top_unknowns_per_col = 20,
@@ -51,7 +88,7 @@ cfg <- list(
 #     paste0(
 #       "Catalog prerequisites are missing in this R session.\n\n",
 #       "Run the loader first from the R Console (manually):\n",
-#       "  source('U:/SOMEC/BaseDeDonnees/GestionDeDonnees/catalog_loader.R')\n\n",
+#       "  source(file.path(project_dir, 'catalog_loader.R'))\n\n",
 #       "Missing functions: ", if (length(.missing_funs)) paste(.missing_funs, collapse = ", ") else "<none>", "\n",
 #       "Missing objects:   ", if (length(.missing_objs)) paste(.missing_objs, collapse = ", ") else "<none>", "\n",
 #       "cat_* present:     ", paste(ls(pattern = '^cat_'), collapse = ", ")
@@ -64,7 +101,6 @@ mp <- build_catalog_map()
 message("Catalog map ready: ", length(mp), " field(s).")
 # ================================================================================
 
-
 out_dir <- file.path(cfg$base_dir, cfg$out_folder)
 dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 
@@ -76,10 +112,15 @@ message("Output folder: ", out_dir)
 #source("catalog_loader.R", local = FALSE)  # uses the same paths as above
 
 # ---------------- Load main data (auto-load from Access if missing) ----------------
-# Minimal auto-load: only if not already present
 auto_load <- function(tbl, accdb, acc_name) {
   if (exists(tbl, envir = .GlobalEnv)) return(invisible(TRUE))
+  if (is.null(accdb) || !nzchar(accdb))
+    stop("ACCDB path is not set. Check resolve_accdb_path().", call. = FALSE)
+  if (!file.exists(accdb))
+    stop("ACCDB file not found: ", accdb, call. = FALSE)
   con <- RODBC::odbcConnectAccess2007(accdb, believeNRows = FALSE)
+  if (identical(con, -1L))
+    stop("ODBC connection failed for: ", accdb, call. = FALSE)
   on.exit(RODBC::odbcClose(con), add = TRUE)
   df <- tryCatch(RODBC::sqlFetch(con, acc_name), error = function(e) NULL)
   if (is.null(df)) stop("Could not load table from Access: ", acc_name)
@@ -95,7 +136,6 @@ auto_load("observations", cfg$accdb_path, "observations")
 missions_df <- missions %>% distinct(mission, .keep_all = TRUE)
 message("Missions found: ", nrow(missions_df))
 
-# In mission_profiler_somerc_v6_3_4.R, right after missions_df <- missions %>% distinct(mission, .keep_all = TRUE)
 mf <- getOption("somec.mission_filter", default = NULL)
 if (!is.null(mf) && length(mf)) {
   missions_df <- missions_df %>% dplyr::filter(.data$mission %in% mf)
@@ -179,7 +219,7 @@ write_one_sheet <- function(wb, sheet_name, df, mission_id, mis_start, mis_end, 
   }
   
   # Forced-categorical (as requested): treat 'mission' & 'cote_obs' as categorical even without a catalog
-  force_categorical_names <- c("mission", "cote_obs",'code_obs')
+  force_categorical_names <- c("mission", "cote_obs", "code_obs")
   nm <- names(df); nm_lc <- tolower(nm)
   is_forced_cat <- nm_lc %in% force_categorical_names
   
@@ -197,207 +237,150 @@ write_one_sheet <- function(wb, sheet_name, df, mission_id, mis_start, mis_end, 
   row_cur   <- 2
   
   place_block <- function(title, tbl, plot_obj = NULL) {
-    # Title
     writeData(wb, sheet_name, title, startRow = row_cur, startCol = START_COL)
     addStyle(wb, sheet_name, createStyle(textDecoration = "bold"), rows = row_cur, cols = START_COL)
-    
-    # Table
     writeData(wb, sheet_name, tbl, startRow = row_cur + 1, startCol = START_COL)
-    
-    # Plot (if any) → right of the table, aligned vertically
     if (!is.null(plot_obj)) {
       plot_col <- START_COL + ncol(tbl) + 3
       insert_plot(wb, sheet_name, plot_obj, startRow = row_cur + 1, startCol = plot_col)
     }
-    
-    # Advance cursor — ensure enough room for the plot height
     used_rows <- nrow(tbl) + 2
     row_cur <<- row_cur + max(used_rows, PLOT_ROWS) + ROW_GAP
   }
   
   # =========================
-  # CONTINUOUS — only n and n_missing
+  # CONTINUOUS
   # =========================
   for (col in num_cols) {
     x_raw <- df[[col]]
-    # Safe numeric coercion for both stats and plotting
     x_num <- suppressWarnings(as.numeric(x_raw))
-    
+
     s <- tibble(
       n         = sum(!is.na(x_num)),
       n_missing = sum(is.na(x_num))
     )
-    
+
     stats <- numeric_summary(x_num)
-    
+
     if (stats$n > 0) {
-      
       is_low  <- x_num < stats$outlier_low
       is_high <- x_num > stats$outlier_high
-      
       n_low  <- sum(is_low, na.rm = TRUE)
       n_high <- sum(is_high, na.rm = TRUE)
-      
+
       if (n_low + n_high > 0) {
-        
         qc_summary$numeric_outliers <- add_row(
           qc_summary$numeric_outliers,
-          table   = table_name,
-          column  = col,
-          n_low   = n_low,
-          n_high  = n_high
+          table = table_name, column = col, n_low = n_low, n_high = n_high
         )
-        
         mission_issues <<- add_row(
           mission_issues,
-          mission    = mission_id,
-          table      = table_name,
-          column     = col,
+          mission = mission_id, table = table_name, column = col,
           issue_type = "NUMERIC_OUTLIER",
-          details    = paste(
-            n_low, "below IQR-low;",
-            n_high, "above IQR-high"
-          )
+          details = paste(n_low, "below IQR-low;", n_high, "above IQR-high")
         )
       }
     }
-    
-    # Plot only if there is at least one non-NA numeric value
+
     p <- if (s$n[1] > 0) plot_hist(x_num, title = col, xlab = col) else NULL
-    
-    place_block(
-      title    = paste0("• ", col, " (num)"),
-      tbl      = s,
-      plot_obj = p
-    )
+    place_block(title = paste0("• ", col, " (num)"), tbl = s, plot_obj = p)
   }
   
   # =========================
-  # CATEGORICAL (has catalog OR forced)
-  #   - Always includes 'found in the catalog'
-  #   - FALSE rows in red
+  # CATEGORICAL
   # =========================
   for (col in cat_cols) {
-    
     v  <- df[[col]]
     ft <- freq_table(v, col, cfg$max_levels_show)
-    
+
     found_hdr <- "found in the catalog"
     ft[[found_hdr]] <- NA
-    
-    # If a mapping exists, evaluate; if column was only forced, flag remains NA
+
     key <- paste0(tolower(table_name), "$", tolower(col))
     unknowns_tbl <- NULL
-    
+
     if (!is.null(mp[[key]])) {
-      allowed  <- mp[[key]]                   # EXACT allowed values
+      allowed  <- mp[[key]]
       vals     <- as.character(v)
       is_found <- vals %in% allowed
-      
-      # Fill the flag at the frequency-table level
+
       ft[[found_hdr]] <- ft$value %in% allowed
-      
-      # Unknowns (for QC summary)
+
       is_unknown <- !is_found & !is.na(vals)
       if (any(is_unknown)) {
         unknowns_tbl <- tibble(value = vals[is_unknown]) |>
           count(value, sort = TRUE, name = "n_records") |>
           slice_head(n = cfg$top_unknowns_per_col) |>
           mutate(table = table_name, column = col, .before = 1)
-      }
-      
-      if (any(is_unknown)) {
         mission_issues <<- add_row(
           mission_issues,
-          mission    = mission_id,
-          table      = table_name,
-          column     = col,
+          mission = mission_id, table = table_name, column = col,
           issue_type = "UNKNOWN_CATALOG",
-          details    = paste(unique(vals[is_unknown]), collapse = ", ")
+          details = paste(unique(vals[is_unknown]), collapse = ", ")
         )
       }
-      
+
       qc_summary$catalog_unknowns <- add_row(
         qc_summary$catalog_unknowns,
-        table             = table_name,
-        column            = col,
+        table = table_name, column = col,
         n_unknown_levels  = sum(ft[[found_hdr]] == FALSE, na.rm = TRUE),
         n_unknown_records = sum(is_unknown)
       )
     } else {
-      # Forced-categorical without mapping → leave the flag NA but still show column
       qc_summary$catalog_unknowns <- add_row(
         qc_summary$catalog_unknowns,
-        table             = table_name,
-        column            = col,
+        table = table_name, column = col,
         n_unknown_levels  = NA_integer_,
         n_unknown_records = NA_integer_
       )
     }
-    
-    place_block(
-      title    = paste0("• ", col, " (categorical)"),
-      tbl      = ft,
-      plot_obj = NULL
-    )
-    
-    # Red font for NOT FOUND (FALSE)
+
+    place_block(title = paste0("• ", col, " (categorical)"), tbl = ft, plot_obj = NULL)
+
     bad_idx <- which(ft[[found_hdr]] == FALSE)
     if (length(bad_idx)) {
-      # Compute Excel row numbers for those data lines
       start_of_block <- row_cur - max(nrow(ft) + 2, PLOT_ROWS) - ROW_GAP
-      xl_rows <- start_of_block + 1 + bad_idx  # +1 for table header
+      xl_rows <- start_of_block + 1 + bad_idx
       conditionalFormatting(
         wb, sheet_name,
         cols = START_COL:(START_COL + ncol(ft) - 1),
         rows = xl_rows,
-        type = "expression",
-        rule = "TRUE",
+        type = "expression", rule = "TRUE",
         style = createStyle(fontColour = "red")
       )
     }
-    
+
     if (!is.null(unknowns_tbl) && nrow(unknowns_tbl)) {
       qc_summary$top_unknowns[[length(qc_summary$top_unknowns) + 1]] <- unknowns_tbl
     }
   }
   
   # =========================
-  # DATETIME (compact; hour histogram on the right)
+  # DATETIME
   # =========================
   for (col in dt_cols) {
     dt   <- suppressWarnings(as_datetime(df[[col]]))
     dmin <- suppressWarnings(min(dt, na.rm = TRUE))
     dmax <- suppressWarnings(max(dt, na.rm = TRUE))
     n_out <- if (!is.na(mis_start) && !is.na(mis_end)) sum(dt < mis_start | dt > mis_end, na.rm = TRUE) else NA_integer_
-    
+
     tbl <- tibble(
       n  = sum(!is.na(dt)),
       min = as.character(dmin),
       max = as.character(dmax),
       n_outside_mission = n_out
     )
-    
+
     p <- plot_hour_hist(dt, title = paste0(col, " — heure"))
-    
-    place_block(
-      title    = paste0("• ", col, " (datetime)"),
-      tbl      = tbl,
-      plot_obj = p
-    )
-    
+    place_block(title = paste0("• ", col, " (datetime)"), tbl = tbl, plot_obj = p)
+
     if (!is.na(n_out) && n_out > 0) {
       qc_summary$mission_bounds <- add_row(qc_summary$mission_bounds, table = table_name, column = col, n_outside = n_out)
-    }
-    
-    if (!is.na(n_out) && n_out > 0) {
       mission_issues <<- add_row(
         mission_issues,
-        mission    = mission_id,
-        table      = table_name,
-        column     = col,
+        mission = mission_id, table = table_name, column = col,
         issue_type = "OUTSIDE_MISSION_DATES",
-        details    = paste(n_out, "records outside mission period")
+        details = paste(n_out, "records outside mission period")
       )
     }
   }
@@ -406,7 +389,6 @@ write_one_sheet <- function(wb, sheet_name, df, mission_id, mis_start, mis_end, 
 }
 
 # ---------------- Main loop ----------------
-# ---- Accumulator for mission-level issues (NEW) ----
 mission_issues <- tibble(
   mission    = character(),
   table      = character(),
@@ -421,8 +403,7 @@ for (i in seq_len(nrow(missions_df))) {
   out_file <- file.path(out_dir, paste0(mis_id, ".xlsx"))
   
   if (!cfg$force_rebuild && file.exists(out_file)) {
-    message(sprintf("[%d/%d] Mission %s — report exists, skipping",
-                    i, nrow(missions_df), mis_id))
+    message(sprintf("[%d/%d] Mission %s — report exists, skipping", i, nrow(missions_df), mis_id))
     next
   }
   message(sprintf("[%d/%d] Mission %s — start", i, nrow(missions_df), mis_id))
@@ -434,15 +415,17 @@ for (i in seq_len(nrow(missions_df))) {
   
   wb <- createWorkbook()
   addWorksheet(wb, "Missions"); addWorksheet(wb, "Transects"); addWorksheet(wb, "Observations"); addWorksheet(wb, "QC_Summary")
-  setColWidths(wb, "Transects", cols = 1:(cfg$tile_cols * cfg$tile_width_cols + 2), widths = 12)
+  setColWidths(wb, "Transects",    cols = 1:(cfg$tile_cols * cfg$tile_width_cols + 2), widths = 12)
   setColWidths(wb, "Observations", cols = 1:(cfg$tile_cols * cfg$tile_width_cols + 2), widths = 12)
   
   writeData(wb, "Missions", paste0("Mission: ", mis_id), startRow = 1, startCol = 1)
   addStyle(wb, "Missions", createStyle(textDecoration = "bold", fontSize = 12), rows = 1, cols = 1)
   writeData(wb, "Missions", m_row, startRow = 3, startCol = 1)
-  sizes <- tibble(n_transects = nrow(t_df), n_observations = nrow(o_df),
-                  obs_dt_min = if (nrow(o_df)) as.character(suppressWarnings(min(as_datetime(o_df$date_heure), na.rm = TRUE))) else NA,
-                  obs_dt_max = if (nrow(o_df)) as.character(suppressWarnings(max(as_datetime(o_df$date_heure), na.rm = TRUE))) else NA)
+  sizes <- tibble(
+    n_transects = nrow(t_df), n_observations = nrow(o_df),
+    obs_dt_min = if (nrow(o_df)) as.character(suppressWarnings(min(as_datetime(o_df$date_heure), na.rm = TRUE))) else NA,
+    obs_dt_max = if (nrow(o_df)) as.character(suppressWarnings(max(as_datetime(o_df$date_heure), na.rm = TRUE))) else NA
+  )
   writeData(wb, "Missions", sizes, startRow = 5 + nrow(m_row), startCol = 1)
   
   # QC accumulators
@@ -456,15 +439,18 @@ for (i in seq_len(nrow(missions_df))) {
   
   qc_summary <- write_one_sheet(wb, "Transects",    t_df, mis_id, mis_start, mis_end, "transects",    qc_summary)
   qc_summary <- write_one_sheet(wb, "Observations", o_df, mis_id, mis_start, mis_end, "observations", qc_summary)
-  
-  # QC sheet
+
   qc_df <- bind_rows(
-    qc_summary$numeric_outliers %>% mutate(type="numeric_outliers"),
-    qc_summary$rare_categories  %>% mutate(type="rare_categories"),
-    qc_summary$mission_bounds   %>% mutate(type="mission_date_bounds"),
-    qc_summary$catalog_unknowns %>% mutate(type="catalog_unknowns")
+    qc_summary$numeric_outliers %>% mutate(type = "numeric_outliers"),
+    qc_summary$rare_categories  %>% mutate(type = "rare_categories"),
+    qc_summary$mission_bounds   %>% mutate(type = "mission_date_bounds"),
+    qc_summary$catalog_unknowns %>% mutate(type = "catalog_unknowns")
   )
-  if (nrow(qc_df)) writeData(wb, "QC_Summary", qc_df, startRow = 1, startCol = 1) else writeData(wb, "QC_Summary", tibble(note="No summary flags"), startRow = 1, startCol = 1)
+  if (nrow(qc_df)) {
+    writeData(wb, "QC_Summary", qc_df, startRow = 1, startCol = 1)
+  } else {
+    writeData(wb, "QC_Summary", tibble(note = "No summary flags"), startRow = 1, startCol = 1)
+  }
   if (length(qc_summary$top_unknowns)) {
     tu <- bind_rows(qc_summary$top_unknowns)
     writeData(wb, "QC_Summary", "TOP UNKNOWN LEVELS (frequency only)", startRow = nrow(qc_df) + 3, startCol = 1)
@@ -472,40 +458,36 @@ for (i in seq_len(nrow(missions_df))) {
     writeData(wb, "QC_Summary", tu, startRow = nrow(qc_df) + 4, startCol = 1)
   }
   
-  out_file <- file.path(out_dir, paste0(mis_id, ".xlsx"))
-  message("  - Saving: ", out_file); saveWorkbook(wb, out_file, overwrite = TRUE)
-  
-  all_index[[length(all_index)+1]] <- tibble(mission=mis_id, n_transects=nrow(t_df), n_observations=nrow(o_df),
-                                             dt_mission_start=as.character(mis_start), dt_mission_end=as.character(mis_end),
-                                             report_path=out_file)
+  message("  - Saving: ", out_file)
+  saveWorkbook(wb, out_file, overwrite = TRUE)
+
+  all_index[[length(all_index) + 1]] <- tibble(
+    mission = mis_id, n_transects = nrow(t_df), n_observations = nrow(o_df),
+    dt_mission_start = as.character(mis_start), dt_mission_end = as.character(mis_end),
+    report_path = out_file
+  )
   message(sprintf("[%d/%d] Mission %s — done", i, nrow(missions_df), mis_id))
 }
 
-# mission_issues <- tibble(
-#   mission,
-#   table,
-#   column,
-#   issue_type,   # "UNKNOWN_CATALOG", "RARE_IN_MISSION", "OUTLIER", etc.
-#   details
-# )
-
 # Global index
 idx <- bind_rows(all_index)
-wb_idx <- createWorkbook(); addWorksheet(wb_idx, "Index"); writeData(wb_idx, "Index", idx, startRow = 1, startCol = 1)
+wb_idx <- createWorkbook()
+addWorksheet(wb_idx, "Index")
+writeData(wb_idx, "Index", idx, startRow = 1, startCol = 1)
 idx_path <- file.path(out_dir, paste0("SOMEC_Mission_QAQC_Index_", format(Sys.Date(), "%Y%m%d"), ".xlsx"))
 saveWorkbook(wb_idx, idx_path, overwrite = TRUE)
 message("Profiler complete: ", idx_path)
 
 mi_path <- file.path(out_dir, "mission_issues.rds")
-
 if (!cfg$force_rebuild && file.exists(mi_path)) {
   message("mission_issues.rds exists — skipping save.")
 } else {
   saveRDS(mission_issues, mi_path)
 }
 
-#if needed : 
+#if needed :
 # if (file.exists(mi_path)) {
 #   file.remove(mi_path)
 # }
 # file.exists(mi_path)
+

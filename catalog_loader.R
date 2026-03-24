@@ -15,10 +15,48 @@ suppressPackageStartupMessages({
 })
 
 # ---------------- CONFIG (EDIT THESE TWO LINES ONLY) ----------------
-relcatalog_xlsx  <- "U:/SOMEC/BaseDeDonnees/GestionDeDonnees/SOMEC_Editeur/RelCatalog.xlsx"  # <-- update date
+project_dir <- tryCatch({
+  frames <- sys.frames()
+  ofiles <- Filter(Negate(is.null), lapply(frames, function(f) f$ofile))
+  if (length(ofiles) > 0) {
+    dirname(normalizePath(ofiles[[1]], mustWork = TRUE))
+  } else {
+    dirname(normalizePath(
+      rstudioapi::getSourceEditorContext()$path, mustWork = TRUE
+    ))
+  }
+}, error = function(e) getwd())
+relcatalog_xlsx  <- normalizePath(file.path(project_dir, "RelCatalog.xlsx"), winslash = "/", mustWork = FALSE)
 relcatalog_sheet <- "RelCatalog"
 
-accdb_path <- "U:/SOMEC/BaseDeDonnees/SOMEC_20251106.accdb"
+resolve_accdb_path <- function(project_dir) {
+  if (.Platform$OS.type != "windows") return(NULL)
+
+  # project_dir = .../SOMEC/BaseDeDonnees/GestionDeDonnees/SOMEC_Editeur
+  # .accdb files live directly in .../SOMEC/BaseDeDonnees/
+  db_dir <- normalizePath(
+    dirname(dirname(project_dir)),
+    winslash = "/", mustWork = FALSE
+  )
+
+  env_path <- Sys.getenv("SOMEC_ACCDB_PATH", unset = "")
+  if (nzchar(env_path)) {
+    return(normalizePath(env_path, winslash = "/", mustWork = FALSE))
+  }
+
+  env_suffix <- Sys.getenv("SOMEC_ACCDB_SUFFIX", unset = "")
+  if (nzchar(env_suffix)) {
+    v <- if (grepl("^SOMEC_", env_suffix)) env_suffix else paste0("SOMEC_", env_suffix)
+    return(normalizePath(file.path(db_dir, paste0(v, ".accdb")), winslash = "/", mustWork = FALSE))
+  }
+
+  files <- list.files(db_dir, pattern = "^SOMEC_\\d{8}\\.accdb$", full.names = TRUE)
+  if (!length(files)) return(NULL)
+
+  normalizePath(files[order(file.info(files)$mtime, decreasing = TRUE)][1], winslash = "/", mustWork = FALSE)
+}
+
+accdb_path <- resolve_accdb_path(project_dir)
 # -------------------------------------------------------------------
 
 message("=== Catalog Loader start ===")
@@ -26,6 +64,17 @@ message("RelCatalog XLSX: ", relcatalog_xlsx)
 message("Access DB:       ", accdb_path)
 
 # ---------- Helpers ----------
+if (is.null(accdb_path) || !nzchar(accdb_path)) {
+  stop(
+    "Could not resolve ACCDB path.\n",
+    "  Set SOMEC_ACCDB_SUFFIX (e.g. '20251106') or SOMEC_ACCDB_PATH (full path),\n",
+    "  or place a SOMEC_YYYYMMDD.accdb file in: ",
+    normalizePath(file.path(dirname(dirname(project_dir)), "BaseDeDonnees"),
+                  winslash = "/", mustWork = FALSE),
+    call. = FALSE
+  )
+}
+
 normalize_name <- function(s) {
   s <- as.character(s)
   s <- gsub("\\s+"," ", s)

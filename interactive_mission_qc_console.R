@@ -1,4 +1,4 @@
-suppressPackageStartupMessages({
+﻿suppressPackageStartupMessages({
   library(tidyverse)
   library(lubridate)
   library(janitor)
@@ -45,14 +45,6 @@ select_language <- function() {
   if (!.lang %in% c("e","f")) .lang <<- "e"
 }
 select_language()
-
-if (interactive()) {
-  cat("Language / Langue: [e] English  [f] Français > ")
-  .lang <- tolower(trimws(readline()))
-} else {
-  .lang <- "e"
-}
-if (!.lang %in% c("e", "f")) .lang <- "e"
 
 .strings <- list(
   loading_cache    = c(e = "Loading cached version of",       f = "Chargement de la version en cache de"),
@@ -146,16 +138,86 @@ msg <- function(key) {
   }
 }, error = function(e) getwd())
 
+resolve_accdb <- function(repo_root, suffix = NULL, accdb_path = NULL) {
+  if (.Platform$OS.type != "windows") {
+    return(list(version = NA_character_, path = NULL, db_dir = NULL))
+  }
+
+  # repo_root = .../SOMEC/BaseDeDonnees/GestionDeDonnees/SOMEC_Editeur
+  # .accdb files live directly in .../SOMEC/BaseDeDonnees/ (2 levels up)
+  db_dir <- normalizePath(
+    dirname(dirname(repo_root)),
+    winslash = "/", mustWork = FALSE
+  )
+
+  if (!is.null(accdb_path) && nzchar(accdb_path)) {
+    p <- normalizePath(accdb_path, winslash = "/", mustWork = FALSE)
+    return(list(
+      version = tools::file_path_sans_ext(basename(p)),
+      path = p,
+      db_dir = db_dir
+    ))
+  }
+
+  if (!is.null(suffix) && nzchar(suffix)) {
+    v <- if (grepl("^SOMEC_", suffix)) suffix else paste0("SOMEC_", suffix)
+    p <- normalizePath(file.path(db_dir, paste0(v, ".accdb")), winslash = "/", mustWork = FALSE)
+    return(list(version = v, path = p, db_dir = db_dir))
+  }
+
+  files <- list.files(db_dir, pattern = "^SOMEC_\\d{8}\\.accdb$", full.names = TRUE)
+  if (!length(files)) {
+    return(list(version = NA_character_, path = NULL, db_dir = db_dir))
+  }
+
+  latest <- files[order(file.info(files)$mtime, decreasing = TRUE)][1]
+  latest <- normalizePath(latest, winslash = "/", mustWork = FALSE)
+
+  list(
+    version = tools::file_path_sans_ext(basename(latest)),
+    path = latest,
+    db_dir = db_dir
+  )
+}
+
+ask_accdb_choice <- function(repo_root) {
+  env_path <- Sys.getenv("SOMEC_ACCDB_PATH", unset = "")
+  env_suffix <- Sys.getenv("SOMEC_ACCDB_SUFFIX", unset = "")
+  default <- resolve_accdb(repo_root, suffix = env_suffix, accdb_path = env_path)
+
+  if (!interactive()) return(default)
+
+  default_suffix <- if (is.na(default$version)) "auto" else sub("^SOMEC_", "", default$version)
+  prompt_txt <- if (.lang == "f") {
+    paste0("Suffixe ACCDB (YYYYMMDD) [Entrée = ", default_suffix, "] : ")
+  } else {
+    paste0("ACCDB suffix (YYYYMMDD) [Enter = ", default_suffix, "]: ")
+  }
+
+  ans <- trimws(readline(prompt_txt))
+  if (nzchar(ans)) {
+    return(resolve_accdb(repo_root, suffix = ans))
+  }
+
+  default
+}
+
+.accdb <- ask_accdb_choice(.repo_root)
+
 cfg <- list(
-  accdb_version       = "SOMEC_20251106",
-  accdb_path          = if (.Platform$OS.type == "windows")
-                          file.path(dirname(dirname(.repo_root)), "BaseDeDonnees", "SOMEC_20251106.accdb")
-                        else
-                          NULL,
+  accdb_version       = .accdb$version,
+  accdb_path          = .accdb$path,
   context_dir         = file.path(.repo_root, "GlobalContext"),
   mission_reports_dir = file.path(.repo_root, "MissionReports"),
   cache_dir           = file.path(.repo_root, "GlobalContext", "_cache")
 )
+
+if (is.null(cfg$accdb_path) || !nzchar(cfg$accdb_path)) {
+  stop("No ACCDB file could be resolved. Set SOMEC_ACCDB_PATH or SOMEC_ACCDB_SUFFIX.", call. = FALSE)
+}
+if (!file.exists(cfg$accdb_path)) {
+  stop("ACCDB file not found: ", cfg$accdb_path, call. = FALSE)
+}
 
 dir.create(cfg$cache_dir, showWarnings = FALSE, recursive = TRUE)
 
@@ -429,7 +491,7 @@ build_numeric_snippet <- function(ctx) {
     .dl <- if (.lang == "f")
       c("1" = "Laisser tel quel (NA conservé)",
         "2" = paste0("Remplacer par la moyenne (", mis_mean, ")"),
-        "3" = paste0("Remplacer par la médiane (", mis_median, ")"),
+        "3" = paste0("Remplacer par la médiane (", mis_median, ")",),
         "4" = "Valeur personnalisée")
     else
       c("1" = "Leave as-is (NA kept)",
