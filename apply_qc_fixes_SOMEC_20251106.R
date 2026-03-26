@@ -11,45 +11,56 @@
 # ============================================================
 
 
-# ── COR180604 | CV_R10 | transects$R10 [2026-03-26 13:56] ──
-# R10 -- inspect flagged transects (mission COR180604)
-transects |> filter(mission == "COR180604", id_transect %in% c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 22, 44, 45, 46, 48, 51, 55, 61, 80, 81, 105)) |>
-  select(mission, id_transect, site, date_heure, longitude, latitude, vit_plateforme)
-
-# R10 -- replace missing vit_plateforme with computed speed in knots
-vit_impute <- tibble::tribble(
-  ~id_transect, ~vit_calc_kn,
-    1, 11.031,
-    2, 8.044,
-    3, 9.568,
-    4, 10.937,
-    5, 9.861,
-    6, 10.383,
-    7, 10.594,
-    8, 4.106,
-    9, 11.139,
-    10, 9.584,
-    11, 9.605,
-    12, 6.734,
-    13, 12.044,
-    22, 12.155,
-    44, 11.322,
-    45, 11.138,
-    46, 11.671,
-    48, 4.944,
-    51, 11.004,
-    55, 11.825,
-    61, 9.515
-)
-
+# ── AVI090806 | UNKNOWN_CATALOG | transects$site [2026-03-26 16:39] ──
 transects <- transects |>
-  left_join(vit_impute, by = "id_transect") |>
   mutate(
-    vit_plateforme = if_else(
-      mission == "COR180604" & is.na(vit_plateforme) & !is.na(vit_calc_kn),
-      vit_calc_kn,
-      vit_plateforme
+    site = case_when(
+      site == "Début" ~ "début",
+      site == "Fin" ~ "fin",
+      TRUE ~ site
     )
-  ) |>
-  select(-vit_calc_kn)
+  )
 
+# ── AVI090806 | NUMERIC_OUTLIER_NA | transects$vagues [2026-03-26 16:44] ──
+# NA decision [vagues]: Replace with median (0.5)
+transects <- transects |>
+  mutate(
+    vagues = if_else(mission == "AVI090806" & is.na(vagues),
+      0.5, vagues)
+  )
+
+# ============================================================
+
+# ── AVI090806 | UNKNOWN_CATALOG | transects$site [2026-03-26 16:45] ──
+transects <- transects |>
+  mutate(
+    site = case_when(
+      site == "Début" ~ "début",
+      site == "Fin" ~ "fin",
+      TRUE ~ site
+    )
+  )
+
+# CLOSING — save updated RDS + create new accdb (Windows only)
+# ============================================================
+
+saveRDS(missions,     file.path(.cache_dir, "missions.rds"))
+saveRDS(transects,    file.path(.cache_dir, "transects.rds"))
+saveRDS(observations, file.path(.cache_dir, "observations.rds"))
+cat("\u2705 Updated RDS files saved.\n")
+
+if (.Platform$OS.type == "windows") {
+  .gestion_root <- dirname(.repo_root)
+  .somec_root   <- dirname(.gestion_root)
+  .accdb_src    <- file.path(.somec_root, "BaseDeDonnees", "SOMEC_20251106.accdb")
+  .accdb_dst    <- file.path(.somec_root, "BaseDeDonnees", "SOMEC_20260326.accdb")
+  file.copy(.accdb_src, .accdb_dst, overwrite = FALSE)
+  con <- RODBC::odbcConnectAccess2007(.accdb_dst, believeNRows = FALSE)
+  RODBC::sqlSave(con, missions,     tablename = "missions",     rownames = FALSE, append = FALSE)
+  RODBC::sqlSave(con, transects,    tablename = "transects",    rownames = FALSE, append = FALSE)
+  RODBC::sqlSave(con, observations, tablename = "observations", rownames = FALSE, append = FALSE)
+  RODBC::odbcClose(con)
+  cat("\u2705 New accdb created: SOMEC_20260326.accdb\n")
+} else {
+  cat("\u26a0\ufe0f  Run on Windows to create the new .accdb file.\n")
+}

@@ -213,13 +213,244 @@ explain_cv_rule <- function(rule, df_violations, mission_id) {
 
   snippet <- NULL
 
+  # R1: id_transect NA but in_transect != HORS TRANSECT
+  if (rule == "R1") {
+    cat(if (.lang == "f")
+      "Ces lignes ont in_transect != HORS TRANSECT mais id_transect est manquant.\nAction: verifier si le transect correspondant existe et assigner l'id_transect.\n"
+    else
+      "These rows have in_transect != HORS TRANSECT but id_transect is missing.\nAction: check if the corresponding transect exists and assign id_transect.\n")
+    ids <- paste(unique(df_violations$id), collapse = ", ")
+    snippet <- paste0(
+      "# R1 -- assign missing id_transect (mission ", mission_id, ")\n",
+      "# Inspect these observation ids and assign manually:\n",
+      "observations |> filter(mission == \"", mission_id, "\", id %in% c(", ids, ")) |>\n",
+      "  select(id, date, heure, in_transect, id_transect, code_espece)\n\n",
+      "# Example fix (replace XX with correct transect id):\n",
+      "# observations <- observations |>\n",
+      "#   mutate(id_transect = if_else(mission == \"", mission_id, "\" & id %in% c(", ids, "), XX, id_transect))\n"
+    )
+    cat(if (.lang == "f") "\nCORRECTION SUGGEREE:\n\n" else "\nSUGGESTED FIX:\n\n")
+    cat(snippet, "\n")
+    return(invisible(snippet))
+  }
+
+  # R2: code_espece = RIEN but non-NA fields present
+  if (rule == "R2") {
+    cat(if (.lang == "f")
+      "Ces lignes ont code_espece = RIEN mais des champs associes sont remplis (ne devraient pas l'etre).\nAction: mettre ces champs a NA ou corriger code_espece.\n"
+    else
+      "These rows have code_espece = RIEN but associated fields are filled (should be NA).\nAction: set those fields to NA or correct code_espece.\n")
+    ids <- paste(unique(df_violations$id), collapse = ", ")
+    rien_cols_str <- paste0(.rien_cols, collapse = '", "')
+    snippet <- paste0(
+      "# R2 -- clear non-NA fields where code_espece = RIEN (mission ", mission_id, ")\n",
+      "observations <- observations |>\n",
+      "  mutate(across(\n",
+      "    c(\"", rien_cols_str, "\"),\n",
+      "    ~ if_else(mission == \"", mission_id, "\" &\n",
+      "      str_to_upper(str_trim(code_espece)) == \"RIEN\", NA, .)\n",
+      "  ))\n"
+    )
+    cat(if (.lang == "f") "\nCORRECTION SUGGEREE:\n\n" else "\nSUGGESTED FIX:\n\n")
+    cat(snippet, "\n")
+    return(invisible(snippet))
+  }
+
+  # R3: code_espece != RIEN but nb_individu or activite NA
+  if (rule == "R3") {
+    n_na_nb  <- sum(is.na(df_violations$nb_individu))
+    n_na_act <- sum(is.na(df_violations$activite))
+    cat(if (.lang == "f")
+      paste0("nb_individu manquant: ", n_na_nb, "  |  activite manquant: ", n_na_act, "\n",
+             "Action: completer ces champs depuis les donnees source ou marquer pour inspection.\n")
+    else
+      paste0("nb_individu missing: ", n_na_nb, "  |  activite missing: ", n_na_act, "\n",
+             "Action: fill from source data or flag for manual inspection.\n"))
+    ids <- paste(unique(df_violations$id), collapse = ", ")
+    snippet <- paste0(
+      "# R3 -- inspect rows with missing nb_individu or activite (mission ", mission_id, ")\n",
+      "observations |> filter(mission == \"", mission_id, "\", id %in% c(", ids, ")) |>\n",
+      "  select(id, date, heure, code_espece, nb_individu, activite, snapshot, in_transect)\n\n",
+      "# Fix example — set nb_individu to 1 where missing (adjust as needed):\n",
+      "# observations <- observations |>\n",
+      "#   mutate(nb_individu = if_else(\n",
+      "#     mission == \"", mission_id, "\" & id %in% c(", ids, ") & is.na(nb_individu), 1L, nb_individu))\n"
+    )
+    cat(if (.lang == "f") "\nCORRECTION SUGGEREE:\n\n" else "\nSUGGESTED FIX:\n\n")
+    cat(snippet, "\n")
+    return(invisible(snippet))
+  }
+
+  # R4: missing distance data
+  if (rule == "R4") {
+    obs_mis_raw <- observations |>
+      tibble::as_tibble() |>
+      dplyr::filter(.data[["mission"]] == mission_id) |>
+      normalize_obs()
+    has_rad_no_par <- obs_mis_raw |>
+      dplyr::filter(espece_n != "RIEN", !is.na(tra_rad) | !is.na(dis_rad),
+             is.na(tra_par) & is.na(dis_par))
+    if (nrow(has_rad_no_par) > 0) {
+      cat(if (.lang == "f")
+        paste0("  ", nrow(has_rad_no_par), " lignes ont des valeurs _rad mais pas de valeurs _par.\n",
+               "  Action: copier _rad dans _par puis effacer _rad.\n")
+      else
+        paste0("  ", nrow(has_rad_no_par), " rows have _rad values but no _par values.\n",
+               "  Action: copy _rad into _par then clear _rad.\n"))
+      snippet <- paste0(
+        "# R4 fix: copy _rad into _par where _par is missing, then clear _rad\n",
+        "observations <- observations |>\n",
+        "  mutate(\n",
+        "    tra_par = if_else(mission == \"", mission_id, "\" &\n",
+        "      (is.na(tra_par) & is.na(dis_par)) & (!is.na(tra_rad) | !is.na(dis_rad)),\n",
+        "      tra_rad, tra_par),\n",
+        "    dis_par = if_else(mission == \"", mission_id, "\" &\n",
+        "      (is.na(tra_par) & is.na(dis_par)) & (!is.na(tra_rad) | !is.na(dis_rad)),\n",
+        "      dis_rad, dis_par),\n",
+        "    tra_rad = if_else(mission == \"", mission_id, "\" & !is.na(tra_par), NA_real_, tra_rad),\n",
+        "    dis_rad = if_else(mission == \"", mission_id, "\" & !is.na(dis_par), NA_real_, dis_rad)\n",
+        "  )"
+      )
+    } else {
+      cat(if (.lang == "f")
+        "  Aucune donnee _rad disponible pour copier. Inspection manuelle requise.\n"
+      else
+        "  No _rad data available to copy. Manual inspection required.\n")
+      ids <- paste(unique(df_violations$id), collapse = ", ")
+      snippet <- paste0(
+        "# R4 -- inspect rows with missing distance data (mission ", mission_id, ")\n",
+        "observations |> filter(mission == \"", mission_id, "\", id %in% c(", ids, ")) |>\n",
+        "  select(id, date, heure, code_espece, activite, tra_rad, dis_rad, tra_par, dis_par)\n"
+      )
+    }
+    cat(if (.lang == "f") "\nCORRECTION SUGGEREE:\n\n" else "\nSUGGESTED FIX:\n\n")
+    cat(snippet, "\n")
+    return(invisible(snippet))
+  }
+
+  # R5: _rad data present in _par-only mission
+  if (rule == "R5") {
+    cat(if (.lang == "f")
+      "Cette mission utilise uniquement le protocole _par.\nCes lignes ont des valeurs _rad qui doivent etre copiees dans _par (si _par est vide) puis effacees.\n"
+    else
+      "This is a _par-only mission.\nThese rows have _rad values that should be copied into _par (if _par is empty) then cleared.\n")
+    snippet <- paste0(
+      "# R5 fix: copy _rad -> _par where _par is missing, then clear _rad (mission ", mission_id, ")\n",
+      "observations <- observations |>\n",
+      "  mutate(\n",
+      "    tra_par = if_else(\n",
+      "      mission == \"", mission_id, "\" & is.na(tra_par) & !is.na(tra_rad),\n",
+      "      tra_rad, tra_par),\n",
+      "    dis_par = if_else(\n",
+      "      mission == \"", mission_id, "\" & is.na(dis_par) & !is.na(dis_rad),\n",
+      "      dis_rad, dis_par),\n",
+      "    tra_rad = if_else(mission == \"", mission_id, "\", NA_real_, tra_rad),\n",
+      "    dis_rad = if_else(mission == \"", mission_id, "\", NA_real_, dis_rad)\n",
+      "  )\n"
+    )
+    cat(if (.lang == "f") "\nCORRECTION SUGGEREE:\n\n" else "\nSUGGESTED FIX:\n\n")
+    cat(snippet, "\n")
+    return(invisible(snippet))
+  }
+
+  # R6: activite=VOL but snapshot != OUI
+  if (rule == "R6") {
+    global_r6 <- observations |> tibble::as_tibble() |> normalize_obs() |>
+      dplyr::filter(activite_n == "VOL") |>
+      dplyr::count(mission, snapshot_pattern = snapshot_n, name = "n") |>
+      dplyr::arrange(mission, snapshot_pattern)
+    cat(if (.lang == "f") "PATRON GLOBAL snapshot pour activite=VOL :\n"
+        else              "GLOBAL snapshot pattern for activite=VOL:\n")
+    print(global_r6, n = Inf)
+    n_vol <- sum(normalize_obs(tibble::as_tibble(observations) |>
+      dplyr::filter(mission == mission_id))$activite_n == "VOL", na.rm = TRUE)
+    pct_violation <- if (n_vol > 0) round(100 * nrow(df_violations) / n_vol) else 0
+    cat(if (.lang == "f")
+      paste0("\n  ", pct_violation, "% des lignes VOL sont en violation dans cette mission\n")
+    else
+      paste0("\n  ", pct_violation, "% of VOL rows are in violation in this mission\n"))
+    snippet <- paste0(
+      "# R6 fix: set snapshot = 'Oui' where activite = VOL (mission ", mission_id, ")\n",
+      "observations <- observations |>\n",
+      "  mutate(\n",
+      "    snapshot = if_else(\n",
+      "      mission == \"", mission_id, "\" &\n",
+      "      str_to_upper(str_trim(activite)) == \"VOL\" &\n",
+      "      str_to_upper(str_trim(snapshot)) != \"OUI\",\n",
+      "      \"Oui\", snapshot\n",
+      "    )\n",
+      "  )"
+    )
+    cat(if (.lang == "f") "\nCORRECTION SUGGEREE:\n\n" else "\nSUGGESTED FIX:\n\n")
+    cat(snippet, "\n")
+    return(invisible(snippet))
+  }
+
+  # R7: activite=EAU but snapshot != NON
+  if (rule == "R7") {
+    global_r7 <- observations |> tibble::as_tibble() |> normalize_obs() |>
+      dplyr::filter(activite_n == "EAU") |>
+      dplyr::count(mission, snapshot_pattern = snapshot_n, name = "n") |>
+      dplyr::arrange(mission, snapshot_pattern)
+    cat(if (.lang == "f") "PATRON GLOBAL snapshot pour activite=EAU :\n"
+        else              "GLOBAL snapshot pattern for activite=EAU:\n")
+    print(global_r7, n = Inf)
+    snippet <- paste0(
+      "# R7 fix: set snapshot = 'Non' where activite = EAU (mission ", mission_id, ")\n",
+      "observations <- observations |>\n",
+      "  mutate(\n",
+      "    snapshot = if_else(\n",
+      "      mission == \"", mission_id, "\" &\n",
+      "      str_to_upper(str_trim(activite)) == \"EAU\" &\n",
+      "      str_to_upper(str_trim(snapshot)) != \"NON\",\n",
+      "      \"Non\", snapshot\n",
+      "    )\n",
+      "  )"
+    )
+    cat(if (.lang == "f") "\nCORRECTION SUGGEREE:\n\n" else "\nSUGGESTED FIX:\n\n")
+    cat(snippet, "\n")
+    return(invisible(snippet))
+  }
+
+  # R8: in_transect or snapshot NA
+  if (rule == "R8") {
+    n_na_it  <- sum(is.na(df_violations$in_transect))
+    n_na_sn  <- sum(is.na(df_violations$snapshot))
+    cat(if (.lang == "f")
+      paste0("in_transect manquant: ", n_na_it, "  |  snapshot manquant: ", n_na_sn, "\n",
+             "Action: completer depuis les donnees source ou inspecter manuellement.\n")
+    else
+      paste0("in_transect missing: ", n_na_it, "  |  snapshot missing: ", n_na_sn, "\n",
+             "Action: fill from source data or inspect manually.\n"))
+    ids <- paste(unique(df_violations$id), collapse = ", ")
+    snippet <- paste0(
+      "# R8 -- inspect rows with missing in_transect or snapshot (mission ", mission_id, ")\n",
+      "observations |> filter(mission == \"", mission_id, "\", id %in% c(", ids, ")) |>\n",
+      "  select(id, date, heure, code_espece, activite, snapshot, in_transect)\n"
+    )
+    cat(if (.lang == "f") "\nCORRECTION SUGGEREE:\n\n" else "\nSUGGESTED FIX:\n\n")
+    cat(snippet, "\n")
+    return(invisible(snippet))
+  }
+
+  # R9
   if (rule == "R9") {
     cat(if (.lang == "f")
       "Les valeurs _rad et _par different - inspection manuelle requise.\n"
     else
       "_rad and _par values differ - manual inspection required.\n")
+    ids <- paste(unique(df_violations$id), collapse = ", ")
+    snippet <- paste0(
+      "# R9 -- inspect _rad vs _par discrepancies (mission ", mission_id, ")\n",
+      "observations |> filter(mission == \"", mission_id, "\", id %in% c(", ids, ")) |>\n",
+      "  select(id, date, heure, code_espece, activite, tra_rad, dis_rad, tra_par, dis_par)\n"
+    )
+    cat(if (.lang == "f") "\nCORRECTION SUGGEREE:\n\n" else "\nSUGGESTED FIX:\n\n")
+    cat(snippet, "\n")
+    return(invisible(snippet))
   }
 
+  # R10
   if (rule == "R10") {
     x <- df_violations |>
       dplyr::mutate(
@@ -283,6 +514,7 @@ explain_cv_rule <- function(rule, df_violations, mission_id) {
     return(invisible(snippet))
   }
 
+  # R11
   if (rule == "R11") {
     by_issue <- df_violations |>
       dplyr::count(issue, name = "n") |>

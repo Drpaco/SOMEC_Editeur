@@ -1,6 +1,9 @@
-﻿suppressPackageStartupMessages({
-  library(tidyverse)
+suppressPackageStartupMessages({
+  library(dplyr)
   library(lubridate)
+  library(stringr)
+  library(tibble)
+  library(ggplot2)
   library(janitor)
   library(RODBC)
   library(stringdist)
@@ -594,12 +597,12 @@ build_numeric_snippet <- function(ctx) {
 # INTERACTIVE LOOP
 # ============================================================
 
-# ...existing code...
 run_interactive_qc <- function() {
+
+  reset_fixes_state()
 
   all_missions  <- unique(mission_issues$mission)
   missions_list <- .select_missions(all_missions)
-# ...existing code...
 
   for (m_idx in seq_along(missions_list)) {
     mis    <- missions_list[m_idx]
