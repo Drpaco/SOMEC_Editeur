@@ -469,6 +469,17 @@ explain_issue <- function(issue_row, mission_id) {
   }
 }
 
+# R
+.parse_details <- function(x) {
+  parts <- strsplit(x, ";\\s*")[[1]]
+  kv <- strsplit(parts, "=", fixed = TRUE)
+  out <- setNames(
+    vapply(kv, function(z) if (length(z) >= 2) z[2] else "", character(1)),
+    vapply(kv, function(z) z[1], character(1))
+  )
+  out
+}
+
 # ============================================================
 # NUMERIC FIX MENU
 # ============================================================
@@ -532,40 +543,6 @@ build_numeric_snippet <- function(ctx) {
   if (length(snippets) == 0) return(NULL)
   snippets
 }
-
-# ============================================================
-# MISSION SELECTION
-# ============================================================
-
-.select_missions <- function(missions_list) {
-  cat("\n")
-  cat(if (.lang == "f") "SELECTION DES MISSIONS :\n" else "MISSION SELECTION:\n")
-  cat(if (.lang == "f")
-    "  [1] Commencer depuis le debut\n  [2] Commencer a une mission specifique\n  [3] Traiter une seule mission\n"
-  else
-    "  [1] Start from the beginning\n  [2] Start at a specific mission\n  [3] Process one mission only\n")
-  cat("\n")
-  sel <- prompt(if (.lang == "f") "Choix [1/2/3] : " else "Choice [1/2/3]: ", c("1", "2", "3"))
-  if (sel == "1") return(missions_list)
-  cat("\n")
-  for (i in seq_along(missions_list)) cat(sprintf("  [%3d] %s\n", i, missions_list[i]))
-  idx <- suppressWarnings(as.integer(trimws(readline(
-    if (sel == "2")
-      if (.lang == "f") "Numero de la mission de depart : " else "Starting mission number: "
-    else
-      if (.lang == "f") "Numero de la mission : " else "Mission number: "
-  ))))
-  if (is.na(idx) || idx < 1 || idx > length(missions_list)) {
-    cat(if (.lang == "f") "Choix invalide - depuis le debut.\n" else "Invalid - starting from beginning.\n")
-    return(missions_list)
-  }
-  if (sel == "2") return(missions_list[idx:length(missions_list)])
-  return(missions_list[idx])
-}
-
-# ============================================================
-# INTERACTIVE LOOP
-# ============================================================
 
 # ============================================================
 # MISSION SELECTION

@@ -1,4 +1,4 @@
-# === SOMEC Mission Profiler v6.3.4 ===
+﻿# === SOMEC Mission Profiler v6.3.4 ===
 # QA/QC reporting for mission data with platform-specific cross-validation
 
 # === CONFIG ===================================================================
@@ -268,8 +268,9 @@ check_platform_rules <- function(t_df, o_df, mission_id, platform_type) {
     }
   }
 }
+# R10 (watch speed/distance CV) is handled by run_cross_validation() in qc_cross_validation.R
 
-# === MAIN LOOP ==============================================================
+# === MAIN LOOP
 .plane_labels <- c('Avion', 'Islander', 'Partenavia')
 mission_issues <- tibble(mission = character(), table = character(), column = character(), issue_type = character(), platform_type = character(), details = character())
 
@@ -290,6 +291,7 @@ for (i in seq_len(nrow(missions_df))) {
     write_one_sheet(NULL, 'Transects', t_df, mis_id, mis_start, mis_end, 'transects', dummy_qc, plt_type, dry_run = TRUE)
     write_one_sheet(NULL, 'Observations', o_df, mis_id, mis_start, mis_end, 'observations', dummy_qc, plt_type, dry_run = TRUE)
     check_platform_rules(t_df, o_df, mis_id, plt_type)
+    # R10 fired interactively via run_cross_validation() in qc_cross_validation.R
     all_index[[length(all_index) + 1]] <- tibble(mission = mis_id, n_transects = nrow(t_df), n_observations = nrow(o_df), dt_mission_start = as.character(mis_start), dt_mission_end = as.character(mis_end), report_path = out_file)
     message(sprintf('[%d/%d] Mission %s - done (issues-only)', i, nrow(missions_df), mis_id))
     next
