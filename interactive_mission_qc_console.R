@@ -202,6 +202,22 @@ ask_accdb_choice <- function(repo_root) {
   default
 }
 
+cat("\n", strrep("=", 64), "\n", sep = "")
+if (.lang == "f") {
+  cat("Console interactive QA/QC — Missions SOMEC\n")
+  cat("Cette console vous guide mission par mission pour revoir les enjeux,\n")
+  cat("proposer des corrections, puis lancer la validation croisée (R1–R11).\n")
+  cat("Flux rapide : [v]oir détail -> [f]/[a] ajouter correction -> CV -> mission suivante.\n")
+  cat("Une fois la base choisie, vous pourrez sélectionner les missions à traiter.\n")
+} else {
+  cat("Interactive QA/QC Console — SOMEC Missions\n")
+  cat("This console guides you mission-by-mission to review issues,\n")
+  cat("propose fixes, then run cross-validation checks (R1–R11).\n")
+  cat("Quick flow: [v]iew detail -> [f]/[a] add fix -> CV -> next mission.\n")
+  cat("After choosing the database, you can select missions to process.\n")
+}
+cat(strrep("=", 64), "\n", sep = "")
+
 .accdb <- ask_accdb_choice(.repo_root)
 
 cfg <- list(
@@ -502,7 +518,7 @@ build_numeric_snippet <- function(ctx) {
     .dl <- if (.lang == "f")
       c("1" = "Laisser tel quel (NA conservé)",
         "2" = paste0("Remplacer par la moyenne (", mis_mean, ")"),
-        "3" = paste0("Remplacer par la médiane (", mis_median, ")",),
+        "3" = paste0("Remplacer par la médiane (", mis_median, ")"),
         "4" = "Valeur personnalisée")
     else
       c("1" = "Leave as-is (NA kept)",
@@ -578,13 +594,14 @@ build_numeric_snippet <- function(ctx) {
 # INTERACTIVE LOOP
 # ============================================================
 
+# ...existing code...
 run_interactive_qc <- function() {
 
   all_missions  <- unique(mission_issues$mission)
   missions_list <- .select_missions(all_missions)
+# ...existing code...
 
   for (m_idx in seq_along(missions_list)) {
-
     mis    <- missions_list[m_idx]
     issues <- mission_issues |> filter(.data[["mission"]] == mis)
 
@@ -689,17 +706,17 @@ run_interactive_qc <- function() {
       next_mis <- missions_list[m_idx + 1]
       go_next  <- prompt(
         if (.lang == "f")
-          paste0("\n\u2705  Mission ", mis, " terminée. Passer à ", next_mis, " ? [o]ui / [q]uitter > ")
+          paste0("\n✅  Mission ", mis, " terminée. Passer à ", next_mis, " ? [o]ui / [q]uitter > ")
         else
-          paste0("\n\u2705  Mission ", mis, " done. Go to ", next_mis, "? [y]es / [q]uit > "),
+          paste0("\n✅  Mission ", mis, " done. Go to ", next_mis, "? [y]es / [q]uit > "),
         if (.lang == "f") c("o", "q") else c("y", "q"))
       if (go_next == "q") return(invisible(NULL))
     }
   }
 
-  cat("\n\u2705 ", msg("session_complete"), "\n")
+  cat("\n✅ ", msg("session_complete"), "\n")
   if (file.exists(.fixes_script))
-    cat("\U0001F4C4 ", msg("fix_script_label"), .fixes_script, "\n")
+    cat("📄 ", msg("fix_script_label"), .fixes_script, "\n")
 }
 
 # ============================================================
