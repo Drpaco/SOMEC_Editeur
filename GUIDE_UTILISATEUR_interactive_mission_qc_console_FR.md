@@ -3,7 +3,7 @@
 
 **Projet :** `SOMEC_Editeur`  
 **Public visé :** analystes QA/QC des tables `missions`, `transects`, `observations`  
-**Portée :** utilisation interactive du script, génération de corrections, validation croisée, production d’un script de fixes exécutable
+**Portée :** utilisation interactive du script, génération de corrections, validation croisée (R1–R11), production d’un script de fixes exécutable et synthèse globale des erreurs mission
 
 ---
 
@@ -17,7 +17,7 @@
 - propose des diagnostics et des snippets de correction R,
 - permet d’ajouter les corrections retenues dans un script versionné :
   - `apply_qc_fixes_<version_accdb>.R`
-- exécute ensuite les règles de **validation croisée** (R1 à R9) sur `observations`.
+- exécute ensuite les règles de **validation croisée** (R1 à R11) sur `observations` et `transects`.
 
 Le script est conçu pour garder une trace claire des décisions QA.
 
@@ -47,7 +47,10 @@ Le script est conçu pour garder une trace claire des décisions QA.
   Fonctions utilitaires : prompt, viewer HTML, génération/append des fixes, blocs d’ouverture/fermeture.
 
 - `qc_cross_validation.R`  
-  Règles CV R1–R9 + boucle interactive de traitement CV.
+  Règles CV R1–R11 + boucle interactive de traitement CV.
+
+- `mission_error_inventory.R`  
+  Agrège les erreurs (profiler + CV), calcule un signal d’import suspect et exporte un sommaire Excel mission.
 
 ### Données / contexte
 
@@ -63,7 +66,7 @@ Le script est conçu pour garder une trace claire des décisions QA.
 ### Documentation connexe
 
 - `CROSS_VALIDATION_RULES.md`  
-  Détail des règles R1–R9.
+  Détail des règles R1–R11.
 
 ### Sortie générée
 
@@ -85,6 +88,11 @@ Pour les utilisateurs qui veulent consulter des rapports en parallèle de la con
 - `mission_profiler_somerc_v6_3_4.R`  
   - **Sorties Excel mission** : `MissionReports/<MISSION>.xlsx` (un classeur par mission).  
   - **Sortie Excel index** : `MissionReports/SOMEC_Mission_QAQC_Index_<YYYYMMDD>.xlsx` (index global des rapports mission).
+
+- `mission_error_inventory.R`
+  - **Sortie Excel synthèse** : `MissionReports/mission_error_summary_<ACCDB_TAG>.xlsx`
+  - **Onglets** : `Summary`, `Long`, `ImportSuspected`
+  - **Usage** : repérer rapidement les missions avec volume d’erreurs anormal (`import_issue_suspected`) en parallèle de la console interactive.
 
 Ces fichiers peuvent être ouverts pendant la révision dans `interactive_mission_qc_console.R` pour comparer rapidement une anomalie avec son contexte mission/global.
 
@@ -147,6 +155,20 @@ Au lancement, le script :
 4. charge le contexte global,
 5. charge `mission_issues.rds`,
 6. démarre la boucle interactive QA.
+
+## 4.1 Auto-détection des dossiers et de la base (court)
+
+Le script détecte automatiquement :
+
+- la racine repo (`.repo_root`) depuis le script/fichier actif, sinon `getwd()`,
+- le dossier Access (`db_dir`) 2 niveaux au-dessus de `SOMEC_Editeur`,
+- la base ACCDB avec cette priorité :
+  1. `SOMEC_ACCDB_PATH`,
+  2. `SOMEC_ACCDB_SUFFIX`,
+  3. dernier fichier `SOMEC_YYYYMMDD.accdb` modifié,
+  4. saisie interactive.
+
+En cas de doute, forcer explicitement `SOMEC_ACCDB_PATH`.
 
 ---
 
@@ -252,7 +274,7 @@ Après chaque mission, le script lance automatiquement :
 run_cv_for_mission(<mission>)
 ```
 
-Règles prises en charge : **R1 à R9** (voir `CROSS_VALIDATION_RULES.md`).
+Règles prises en charge : **R1 à R11** (voir `CROSS_VALIDATION_RULES.md`).
 
 Exemples :
 
@@ -260,9 +282,29 @@ Exemples :
 - cohérence `code_espece = RIEN`,
 - présence des distances attendues selon protocole,
 - contraintes `activite` ↔ `snapshot` (VOL/OUI, EAU/NON),
-- cohérence `_rad` vs `_par` pour missions double protocole.
+- cohérence `_rad` vs `_par` pour missions double protocole,
+- cohérence distance/durée/vitesse sur transects (R10),
+- intégrité des extrémités `Début`/`Fin` de transects (R11).
 
-Pour certaines règles (R4, R6, R7), le script peut proposer un snippet prêt à ajouter.
+Pour certaines règles (dont R4, R6, R7, R10, R11), le script peut proposer un snippet prêt à ajouter.
+
+## 9.1 Résumé rapide R1–R11
+
+- **R1** : `id_transect` manquant hors `HORS TRANSECT`.
+- **R2** : `code_espece = RIEN` avec champs espèce non-NA.
+- **R3** : `code_espece != RIEN` avec `nb_individu` ou `activite` manquant.
+- **R4** : distances attendues manquantes selon protocole.
+- **R5** : données `_rad` présentes dans mission `_par`-only.
+- **R6** : `activite = VOL` mais `snapshot != OUI`.
+- **R7** : `activite = EAU` mais `snapshot != NON`.
+- **R8** : `in_transect` ou `snapshot` manquant sur non-RIEN.
+- **R9** : divergence `_rad` vs `_par` (double protocole).
+- **R10** : incohérence transect distance/durée/vitesse.
+- **R11** : intégrité `Début`/`Fin` (manquant/dupliqué).
+
+## 9.2 Note pratique R10
+
+R10 n’est pas appliquée aux missions avion (`^AVI|^PAR|^ISL`).
 
 ---
 
@@ -298,18 +340,39 @@ Charge `missions`, `transects`, `observations` depuis `GlobalContext/_cache`.
    - `GlobalContext/Global_Database_Context.xlsx`
    - `MissionReports/<MISSION>.xlsx`
    - `MissionReports/SOMEC_Mission_QAQC_Index_<YYYYMMDD>.xlsx`
-3. Lancer le script en FR.
-4. Choisir la plage de missions.
-5. Pour chaque anomalie pertinente :
+3. (Option recommandé) Lancer `mission_error_inventory.R` pour générer `MissionReports/mission_error_summary_<ACCDB_TAG>.xlsx`.
+4. Lancer le script en FR.
+5. Choisir la plage de missions.
+6. Pour chaque anomalie pertinente :
    - ouvrir les détails,
    - inspecter les lignes/date si nécessaire,
    - générer snippet,
    - ajouter au script de fixes uniquement si validé.
-6. Traiter les violations CV à la fin de chaque mission.
-7. Quitter quand la session QA est terminée.
-8. Ouvrir `apply_qc_fixes_*.R`, relire.
-9. Exécuter le script de fixes pour produire cache + ACCDB mis à jour.
-10. Rejouer une passe QA rapide pour confirmer.
+7. Traiter les violations CV à la fin de chaque mission.
+8. Quitter quand la session QA est terminée.
+9. Ouvrir `apply_qc_fixes_*.R`, relire.
+10. Exécuter le script de fixes pour produire cache + ACCDB mis à jour.
+11. Rejouer `mission_error_inventory.R` et une passe QA rapide pour confirmer la réduction des enjeux.
+
+## 11.1 Utilisation de `force_rebuild` / `force_rebuild_issues`
+
+Dans `mission_profiler_somerc_v6_3_4.R` :
+
+- `force_rebuild = TRUE` : reconstruit tous les Excel + index + `mission_issues.rds`.
+- `force_rebuild = FALSE` et `force_rebuild_issues = TRUE` : met à jour `mission_issues.rds` sans réécrire les Excel.
+- `force_rebuild = FALSE` et `force_rebuild_issues = FALSE` : réutilise les sorties existantes.
+
+Usage conseillé :
+
+- en itération QA : `force_rebuild_issues = TRUE`,
+- avant diffusion : `force_rebuild = TRUE`.
+
+## 11.2 Autres edits potentiels utiles
+
+- `options(somec.mission_filter = c("MISSION1", "MISSION2"))` pour profiler un sous-ensemble.
+- Ajuster `cfg$skip_pattern` (colonnes commentaire ignorées).
+- Ajuster `cfg$top_unknowns_per_col` / `cfg$max_levels_show` (lisibilité rapports).
+- Utiliser `SOMEC_ACCDB_PATH` pour verrouiller la base cible.
 
 ---
 
@@ -338,6 +401,11 @@ Solution :
 Vérifier la version et l’arborescence attendue :
 
 - `BaseDeDonnees/SOMEC_20251106.accdb` (selon config courante du script).
+
+Si nécessaire, forcer la sélection via :
+
+- `SOMEC_ACCDB_PATH`, ou
+- `SOMEC_ACCDB_SUFFIX`.
 
 ## 13.3 Viewer ne s’ouvre pas
 
@@ -374,6 +442,12 @@ source("apply_qc_fixes_SOMEC_20251106.R")
 
 (adapter le nom selon le fichier réellement créé)
 
+### Générer la synthèse erreurs mission
+
+```r
+source("mission_error_inventory.R")
+```
+
 ---
 
 ## 15) Scripts en interaction (vue d’ensemble)
@@ -386,11 +460,13 @@ Chaîne logique recommandée :
    ⟶ produit/rafraîchit `GlobalContext/global_context.rds` **et** `GlobalContext/Global_Database_Context.xlsx` (contexte global), utilisé directement par `interactive_mission_qc_console.R`.
 3. `mission_profiler_somerc_v6_3_4.R`  
    ⟶ produit/rafraîchit les rapports `MissionReports/<MISSION>.xlsx`, l’index `SOMEC_Mission_QAQC_Index_<YYYYMMDD>.xlsx` et les enjeux mission (`MissionReports/mission_issues.rds`).
-4. `interactive_mission_qc_console.R`  
+4. `mission_error_inventory.R`
+   ⟶ consolide `mission_issues` + règles CV (`run_cross_validation`) et exporte `MissionReports/mission_error_summary_<ACCDB_TAG>.xlsx`.
+5. `interactive_mission_qc_console.R`  
    ⟶ consomme `mission_issues.rds` + `global_context.rds`, applique l’analyse interactive et propose les fixes.
-5. `qc_helpers.R` + `qc_cross_validation.R` (chargés par la console)  
-   ⟶ gèrent l’écriture des correctifs et la validation croisée R1–R9.
-6. `apply_qc_fixes_<version>.R` (généré)  
+6. `qc_helpers.R` + `qc_cross_validation.R` (chargés par la console)  
+   ⟶ gèrent l’écriture des correctifs et la validation croisée R1–R11.
+7. `apply_qc_fixes_<version>.R` (généré)  
    ⟶ applique les corrections, met à jour les caches RDS, puis peut exporter une nouvelle base `.accdb`.
 
 ## 16) Références internes
@@ -401,9 +477,11 @@ Chaîne logique recommandée :
 - `interactive_mission_qc_console.R`
 - `qc_helpers.R`
 - `qc_cross_validation.R`
+- `mission_error_inventory.R`
 - `CROSS_VALIDATION_RULES.md`
 - `GlobalContext/global_context.rds`
 - `MissionReports/mission_issues.rds`
+- `MissionReports/mission_error_summary_<ACCDB_TAG>.xlsx`
 
 ---
 
