@@ -48,13 +48,16 @@ run_cross_validation <- function(mission_id) {
   r4 <- if (is_both_mission) {
     r4_base |> dplyr::filter(is.na(tra_rad) & is.na(dis_rad) & is.na(tra_par) & is.na(dis_par))
   } else {
-    r4_base |> dplyr::filter(is.na(tra_par) & is.na(dis_par))
+    # _par-only mission: true missing distance only (no _par and no _rad fallback)
+    r4_base |>
+      dplyr::filter(is.na(tra_par) & is.na(dis_par) & is.na(tra_rad) & is.na(dis_rad))
   }
   r4 <- r4 |>
     dplyr::select(dplyr::any_of(c("id", "date", "heure", "code_espece", "activite", "tra_rad", "dis_rad", "tra_par", "dis_par")))
   if (nrow(r4) > 0) results$R4 <- r4
 
   if (!is_both_mission) {
+    # _par-only mission: _rad-present rows are migration candidates (R5)
     r5 <- obs_mis |>
       dplyr::filter(espece_n != "RIEN") |>
       dplyr::filter(!is.na(tra_rad) | !is.na(dis_rad)) |>
@@ -283,46 +286,16 @@ explain_cv_rule <- function(rule, df_violations, mission_id) {
 
   # R4: missing distance data
   if (rule == "R4") {
-    obs_mis_raw <- observations |>
-      tibble::as_tibble() |>
-      dplyr::filter(.data[["mission"]] == mission_id) |>
-      normalize_obs()
-    has_rad_no_par <- obs_mis_raw |>
-      dplyr::filter(espece_n != "RIEN", !is.na(tra_rad) | !is.na(dis_rad),
-             is.na(tra_par) & is.na(dis_par))
-    if (nrow(has_rad_no_par) > 0) {
-      cat(if (.lang == "f")
-        paste0("  ", nrow(has_rad_no_par), " lignes ont des valeurs _rad mais pas de valeurs _par.\n",
-               "  Action: copier _rad dans _par puis effacer _rad.\n")
-      else
-        paste0("  ", nrow(has_rad_no_par), " rows have _rad values but no _par values.\n",
-               "  Action: copy _rad into _par then clear _rad.\n"))
-      snippet <- paste0(
-        "# R4 fix: copy _rad into _par where _par is missing, then clear _rad\n",
-        "observations <- observations |>\n",
-        "  mutate(\n",
-        "    tra_par = if_else(mission == \"", mission_id, "\" &\n",
-        "      (is.na(tra_par) & is.na(dis_par)) & (!is.na(tra_rad) | !is.na(dis_rad)),\n",
-        "      tra_rad, tra_par),\n",
-        "    dis_par = if_else(mission == \"", mission_id, "\" &\n",
-        "      (is.na(tra_par) & is.na(dis_par)) & (!is.na(tra_rad) | !is.na(dis_rad)),\n",
-        "      dis_rad, dis_par),\n",
-        "    tra_rad = if_else(mission == \"", mission_id, "\" & !is.na(tra_par), NA_real_, tra_rad),\n",
-        "    dis_rad = if_else(mission == \"", mission_id, "\" & !is.na(dis_par), NA_real_, dis_rad)\n",
-        "  )"
-      )
-    } else {
-      cat(if (.lang == "f")
-        "  Aucune donnee _rad disponible pour copier. Inspection manuelle requise.\n"
-      else
-        "  No _rad data available to copy. Manual inspection required.\n")
-      ids <- paste(unique(df_violations$id), collapse = ", ")
-      snippet <- paste0(
-        "# R4 -- inspect rows with missing distance data (mission ", mission_id, ")\n",
-        "observations |> filter(mission == \"", mission_id, "\", id %in% c(", ids, ")) |>\n",
-        "  select(id, date, heure, code_espece, activite, tra_rad, dis_rad, tra_par, dis_par)\n"
-      )
-    }
+    cat(if (.lang == "f")
+      "Ces lignes n'ont ni valeurs _par ni valeurs _rad exploitables.\nAction: inspection manuelle requise pour completer les distances.\n"
+    else
+      "These rows have neither usable _par nor _rad distance values.\nAction: manual inspection is required to complete distance data.\n")
+    ids <- paste(unique(df_violations$id), collapse = ", ")
+    snippet <- paste0(
+      "# R4 -- inspect rows with missing distance data (mission ", mission_id, ")\n",
+      "observations |> filter(mission == \"", mission_id, "\", id %in% c(", ids, ")) |>\n",
+      "  select(id, date, heure, code_espece, activite, tra_rad, dis_rad, tra_par, dis_par)\n"
+    )
     cat(if (.lang == "f") "\nCORRECTION SUGGEREE:\n\n" else "\nSUGGESTED FIX:\n\n")
     cat(snippet, "\n")
     return(invisible(snippet))

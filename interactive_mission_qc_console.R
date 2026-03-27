@@ -1,4 +1,4 @@
-suppressPackageStartupMessages({
+﻿suppressPackageStartupMessages({
   library(dplyr)
   library(lubridate)
   library(stringr)
@@ -221,7 +221,13 @@ if (.lang == "f") {
 }
 cat(strrep("=", 64), "\n", sep = "")
 
+# ...existing code...
 .accdb <- ask_accdb_choice(.repo_root)
+
+cat("\n", if (.lang == "f") "Base sélectionnée : " else "Selected database: ",
+    ifelse(is.na(.accdb$version), "(auto)", .accdb$version), "\n", sep = "")
+cat(if (.lang == "f") "Chemin ACCDB : " else "ACCDB path: ",
+    ifelse(is.null(.accdb$path) || !nzchar(.accdb$path), "<none>", .accdb$path), "\n\n", sep = "")
 
 cfg <- list(
   accdb_version       = .accdb$version,
@@ -231,13 +237,26 @@ cfg <- list(
   cache_dir           = file.path(.repo_root, "GlobalContext", "_cache")
 )
 
-if (is.null(cfg$accdb_path) || !nzchar(cfg$accdb_path)) {
-  stop("No ACCDB file could be resolved. Set SOMEC_ACCDB_PATH or SOMEC_ACCDB_SUFFIX.", call. = FALSE)
-}
-if (!file.exists(cfg$accdb_path)) {
-  stop("ACCDB file not found: ", cfg$accdb_path, call. = FALSE)
+cache_files <- file.path(cfg$cache_dir, c("missions.rds", "transects.rds", "observations.rds"))
+cache_ready <- all(file.exists(cache_files))
+
+if (is.null(cfg$accdb_path) || !nzchar(cfg$accdb_path) || !file.exists(cfg$accdb_path)) {
+  if (cache_ready) {
+    cat(if (.lang == "f")
+      "⚠️  ACCDB introuvable. Utilisation du cache RDS uniquement.\n"
+    else
+      "⚠️  ACCDB not found. Using RDS cache only.\n")
+    cfg$accdb_path <- ""
+  } else {
+    stop(
+      "No readable ACCDB and no complete cache available. ",
+      "Set SOMEC_ACCDB_PATH or SOMEC_ACCDB_SUFFIX, or build the cache first.",
+      call. = FALSE
+    )
+  }
 }
 
+# ...existing code...
 dir.create(cfg$cache_dir, showWarnings = FALSE, recursive = TRUE)
 
 # ============================================================
@@ -291,24 +310,24 @@ explain_issue <- function(issue_row, mission_id) {
   cat(msg("variable_label"), paste0(tbl, "$", col), "\n")
   cat("--------------------------------------------\n\n")
 
+# ...existing code...
   # CATEGORICAL
   if (issue_row$issue_type == "UNKNOWN_CATALOG") {
-    cat(msg("miss_dist"), "\n")
-    print_dist(df_mis[[col]])
     n_na <- sum(is.na(df_mis[[col]]))
     cat(msg("missing_na"), n_na, "\n\n")
     if (n_na > 0) {
       df_na <- show_rows_with_context(df_mis, col, which(is.na(df_mis[[col]])))
       view_in_viewer(df_na, title = paste0(col, " — ", msg("rows_missing")))
     }
+# ...existing code...
     allowed    <- catalog_map[[paste0(tolower(tbl), "$", tolower(col))]]
     unknowns   <- strsplit(issue_row$details, ",\\s*")[[1]]
     recode_map <- character()
     cat("\n", msg("catalog_check"), "\n")
     for (u in unknowns) {
-      cat(" \u274c", u, "\n")
+      cat(" ❌", u, "\n")
       best <- allowed[which.min(stringdist(u, allowed, method = "lv"))]
-      cat("    \U0001F4A1", msg("did_you_mean"), best, "\n")
+      cat("    💡", msg("did_you_mean"), best, "\n")
       recode_map[u] <- best
     }
     snippets <- list()
@@ -319,24 +338,11 @@ explain_issue <- function(issue_row, mission_id) {
       snippets$recode <- recode_snippet
     }
     if (n_na > 0) {
-      cat("\n", msg("na_options"), "\n")
-      cat(msg("na_opt1"), "\n")
-      cat(msg("na_opt4"), "\n")
-      cat(msg("na_skip"), "\n\n")
-      na_choice <- prompt(msg("na_prompt"), c("1", "4", ""))
-      na_snippet <- if (na_choice == "1") {
-        paste0("# NA decision [", col, "]: Leave as-is (NA kept)\n# No change applied.\n")
-      } else if (na_choice == "4") {
-        custom <- trimws(readline(paste0(msg("na_custom_prompt"), " ", col, ": ")))
-        paste0("# NA decision [", col, "]: Custom value = ", custom, "\n",
-               tbl, " <- ", tbl, " |>\n  mutate(\n    ", col,
-               " = if_else(mission == \"", mission_id, "\" & is.na(", col, "),\n      \"",
-               custom, "\", ", col, ")\n  )")
-      } else NULL
-      if (!is.null(na_snippet)) {
-        cat("\n", msg("generated_fix"), "\n\n")
-        cat(na_snippet, "\n")
-        snippets$na <- na_snippet
+      cat("\n")
+      if (.lang == "f") {
+        cat("Les options de correction NA seront proposées lors de l'ajout de la correction.\n")
+      } else {
+        cat("NA fix options will be offered when you add the fix.\n")
       }
     }
     if (length(snippets) == 0) return(invisible(NULL))
@@ -443,6 +449,53 @@ explain_issue <- function(issue_row, mission_id) {
     )))
   }
 
+  # DIRECTION (numeric range + NA handling)
+  if (issue_row$issue_type == "DIRECTION_RANGE") {
+    x <- suppressWarnings(as.numeric(df_mis[[col]]))
+    n_na <- sum(is.na(x))
+    outliers <- !is.na(x) & (x < 0 | x > 360)
+
+    cat(msg("miss_num_dist"), "\n")
+    cat(msg("n_label"), sum(!is.na(x)), "\n")
+    cat(msg("missing_label"), n_na, "\n")
+    if (sum(!is.na(x)) > 0) {
+      cat(msg("min_label"), min(x, na.rm = TRUE), "\n")
+      cat(msg("median_label"), median(x, na.rm = TRUE), "\n")
+      cat(msg("max_label"), max(x, na.rm = TRUE), "\n\n")
+    } else {
+      cat(msg("min_label"), "NA\n")
+      cat(msg("median_label"), "NA\n")
+      cat(msg("max_label"), "NA\n\n")
+    }
+
+    df_na <- NULL
+    df_out <- NULL
+    if (n_na > 0)
+      df_na <- show_rows_with_context(df_mis, col, which(is.na(x)))
+    if (any(outliers, na.rm = TRUE))
+      df_out <- show_rows_with_context(df_mis, col, which(outliers))
+
+    df_viewer <- if (!is.null(df_na) && !is.null(df_out)) bind_rows(df_na, df_out)
+                 else if (!is.null(df_na))  df_na
+                 else if (!is.null(df_out)) df_out
+                 else                       NULL
+
+    view_in_viewer(df = df_viewer, title = paste0(tbl, "$", col))
+
+    if (any(outliers, na.rm = TRUE)) {
+      cat("\n", msg("outliers_label"), "\n")
+      cat(msg("n_outliers"), sum(outliers, na.rm = TRUE), "\n")
+      cat(msg("min_outlier"), min(x[outliers], na.rm = TRUE), "\n")
+      cat(msg("max_outlier"), max(x[outliers], na.rm = TRUE), "\n")
+    }
+
+    return(invisible(list(
+      type = "NUMERIC_OUTLIER", x = x, n_na = n_na, outliers = outliers,
+      tbl = tbl, col = col, mission_id = mission_id, df_mis = df_mis,
+      p50 = 180
+    )))
+  }
+
   # DATETIME
   if (issue_row$issue_type == "OUTSIDE_MISSION_DATES") {
     raw_bounds <- get_mission_bounds(missions, mission_id)
@@ -497,6 +550,42 @@ explain_issue <- function(issue_row, mission_id) {
     vapply(kv, function(z) z[1], character(1))
   )
   out
+}
+
+build_categorical_na_snippet <- function(tbl, col, mission_id) {
+  cat("\n", msg("na_options"), "\n")
+  cat(msg("na_opt1"), "\n")
+  cat(msg("na_opt4"), "\n")
+  cat(msg("na_skip"), "\n\n")
+
+  na_choice <- prompt(msg("na_prompt"), c("1", "4", ""))
+
+  na_snippet <- if (na_choice == "1") {
+    if (.lang == "f") {
+      paste0("# Décision NA [", col, "]: Laisser tel quel (NA conservé)\n# Aucun changement appliqué.\n")
+    } else {
+      paste0("# NA decision [", col, "]: Leave as-is (NA kept)\n# No change applied.\n")
+    }
+  } else if (na_choice == "4") {
+    custom <- trimws(readline(paste0(msg("na_custom_prompt"), " ", col, ": ")))
+    paste0(
+      if (.lang == "f") {
+        paste0("# Décision NA [", col, "]: Valeur personnalisée = ", custom, "\n")
+      } else {
+        paste0("# NA decision [", col, "]: Custom value = ", custom, "\n")
+      },
+      tbl, " <- ", tbl, " |>\n  mutate(\n    ", col,
+      " = if_else(mission == \"", mission_id, "\" & is.na(", col, "),\n      \"",
+      custom, "\", ", col, ")\n  )"
+    )
+  } else NULL
+
+  if (!is.null(na_snippet)) {
+    cat("\n", msg("generated_fix"), "\n\n")
+    cat(na_snippet, "\n")
+  }
+
+  na_snippet
 }
 
 # ============================================================
@@ -667,24 +756,57 @@ run_interactive_qc <- function() {
           } else if (post == "a") {
             if (has_snippet) {
               append_fix(snippet, mis, issue$issue_type, issue$table, issue$column)
+
+              if (identical(issue$issue_type, "UNKNOWN_CATALOG") && any(is.na(df_mis[[issue$column]]))) {
+                add_na <- prompt(
+                  if (.lang == "f")
+                    "  Ajouter une correction NA ? [a]jouter / [Entrée] passer > "
+                  else
+                    "  Add NA fix? [a]dd / [Enter] skip > ",
+                  c("a", "")
+                )
+
+                if (add_na == "a") {
+                  na_snippet <- build_categorical_na_snippet(issue$table, issue$column, mis)
+                  if (!is.null(na_snippet)) {
+                    append_fix(
+                      na_snippet,
+                      mis,
+                      paste0(issue$issue_type, "_NA"),
+                      issue$table,
+                      issue$column
+                    )
+                  }
+                }
+              }
+
               snippet <- NULL
             } else if (has_snippets) {
               for (sname in names(snippets)) {
-                label <- if (sname == "na")
+                label <- if (sname == "na") {
                   if (.lang == "f") "correction NA" else "NA fix"
-                else
+                } else if (sname == "recode") {
+                  if (.lang == "f") "correction de recodage" else "recode fix"
+                } else if (sname == "outlier") {
                   if (.lang == "f") "correction aberrants" else "outlier fix"
+                } else {
+                  if (.lang == "f") "correction" else "fix"
+                }
+
                 add <- prompt(
                   if (.lang == "f")
                     paste0("  Ajouter ", label, " ? [a]jouter / [Entrée] passer > ")
                   else
                     paste0("  Add ", label, "? [a]dd / [Enter] skip > "),
                   c("a", ""))
-                if (add == "a")
+
+                if (add == "a") {
                   append_fix(snippets[[sname]], mis,
                              paste0(issue$issue_type, "_", toupper(sname)),
                              issue$table, issue$column)
+                }
               }
+
               snippets <- NULL
             }
             break

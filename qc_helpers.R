@@ -40,13 +40,12 @@ reset_fixes_state <- function() {
     "missions     <- readRDS(file.path(.cache_dir, \"missions.rds\"))\n",
     "transects    <- readRDS(file.path(.cache_dir, \"transects.rds\"))\n",
     "observations <- readRDS(file.path(.cache_dir, \"observations.rds\"))\n\n",
-    "cat(\"\\u2705 Data loaded from cache.\\n\")\n\n",
+    "cat(\"✅ Data loaded from cache.\\n\")\n\n",
     "# ============================================================\n",
     "# FIXES\n",
     "# ============================================================\n\n"
   )
 }
-
 # Generate the closing block (save RDS + create new accdb on Windows)
 .make_closing_block <- function() {
   new_version <- paste0("SOMEC_", format(Sys.Date(), "%Y%m%d"))
@@ -379,7 +378,7 @@ get_global_numeric_baseline <- function(global_ctx, table, column) {
 load_access_table_cached <- function(accdb_path, table_name, cache_dir) {
   cache_file <- file.path(cache_dir, paste0(table_name, ".rds"))
   cache_exists <- file.exists(cache_file)
-  accdb_exists <- !is.null(accdb_path) && file.exists(accdb_path)
+  accdb_exists <- !is.null(accdb_path) && nzchar(accdb_path) && file.exists(accdb_path)
   if (cache_exists && accdb_exists) {
     cache_mtime <- file.info(cache_file)$mtime
     accdb_mtime <- file.info(accdb_path)$mtime
@@ -388,7 +387,7 @@ load_access_table_cached <- function(accdb_path, table_name, cache_dir) {
     }
   }
   if (cache_exists && !accdb_exists) {
-    message("\u26a0\ufe0f  '", basename(accdb_path %||% "accdb"), "' ",
+    message("\u26a0\ufe0f  '", (if (!is.null(accdb_path) && nzchar(accdb_path)) basename(accdb_path) else "accdb"), "' ",
             msg("no_accdb"), " ", msg("loading_cache"), " '", table_name, "'.")
     return(readRDS(cache_file))
   }
