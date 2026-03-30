@@ -125,6 +125,7 @@ msg <- function(key) {
   entry[[lang]]
 }
 
+
 # ============================================================
 # CONFIG
 # ============================================================
@@ -221,7 +222,6 @@ if (.lang == "f") {
 }
 cat(strrep("=", 64), "\n", sep = "")
 
-# ...existing code...
 .accdb <- ask_accdb_choice(.repo_root)
 
 cat("\n", if (.lang == "f") "Base sélectionnée : " else "Selected database: ",
@@ -256,7 +256,6 @@ if (is.null(cfg$accdb_path) || !nzchar(cfg$accdb_path) || !file.exists(cfg$accdb
   }
 }
 
-# ...existing code...
 dir.create(cfg$cache_dir, showWarnings = FALSE, recursive = TRUE)
 
 # ============================================================
@@ -270,7 +269,23 @@ source(file.path(.repo_root, "qc_cross_validation.R"))
 # VERSION + FIX SCRIPT PATH
 # ============================================================
 
+cached_source_version <- NA_character_
+if (isTRUE(cache_ready) && exists(".read_cache_source_meta", mode = "function")) {
+  cache_meta <- .read_cache_source_meta(cfg$cache_dir)
+  if (is.list(cache_meta) && !is.null(cache_meta$accdb_version) && nzchar(cache_meta$accdb_version)) {
+    cached_source_version <- cache_meta$accdb_version
+  }
+}
+
 .accdb_version <- cfg$accdb_version
+if (is.na(.accdb_version) || !nzchar(.accdb_version) || identical(.accdb_version, "NA")) {
+  if (!is.na(cached_source_version) && nzchar(cached_source_version)) {
+    .accdb_version <- cached_source_version
+  } else {
+    .accdb_version <- if (isTRUE(cache_ready)) "CACHE" else format(Sys.Date(), "%Y%m%d")
+  }
+}
+
 .fixes_script  <- file.path(.repo_root, paste0("apply_qc_fixes_", .accdb_version, ".R"))
 
 # ============================================================
@@ -310,7 +325,6 @@ explain_issue <- function(issue_row, mission_id) {
   cat(msg("variable_label"), paste0(tbl, "$", col), "\n")
   cat("--------------------------------------------\n\n")
 
-# ...existing code...
   # CATEGORICAL
   if (issue_row$issue_type == "UNKNOWN_CATALOG") {
     n_na <- sum(is.na(df_mis[[col]]))
@@ -319,7 +333,6 @@ explain_issue <- function(issue_row, mission_id) {
       df_na <- show_rows_with_context(df_mis, col, which(is.na(df_mis[[col]])))
       view_in_viewer(df_na, title = paste0(col, " — ", msg("rows_missing")))
     }
-# ...existing code...
     allowed    <- catalog_map[[paste0(tolower(tbl), "$", tolower(col))]]
     unknowns   <- strsplit(issue_row$details, ",\\s*")[[1]]
     recode_map <- character()

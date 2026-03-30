@@ -375,6 +375,41 @@ get_global_numeric_baseline <- function(global_ctx, table, column) {
     slice_head(n = 1)
 }
 
+.cache_meta_path <- function(cache_dir) {
+  file.path(cache_dir, "cache_source_meta.rds")
+}
+
+.read_cache_source_meta <- function(cache_dir) {
+  p <- .cache_meta_path(cache_dir)
+  if (!file.exists(p)) return(NULL)
+  tryCatch(readRDS(p), error = function(e) NULL)
+}
+
+.write_cache_source_meta <- function(cache_dir, accdb_path, table_name = NULL) {
+  meta <- .read_cache_source_meta(cache_dir)
+  if (is.null(meta) || !is.list(meta)) {
+    meta <- list(tables = list())
+  }
+
+  accdb_version <- tools::file_path_sans_ext(basename(accdb_path))
+  meta$accdb_path <- normalizePath(accdb_path, winslash = "/", mustWork = FALSE)
+  meta$accdb_version <- accdb_version
+  meta$updated_at <- as.character(Sys.time())
+
+  if (is.null(meta$tables) || !is.list(meta$tables)) {
+    meta$tables <- list()
+  }
+  if (!is.null(table_name) && nzchar(table_name)) {
+    meta$tables[[table_name]] <- list(
+      cache_file = file.path(cache_dir, paste0(table_name, ".rds")),
+      cached_at = as.character(Sys.time())
+    )
+  }
+
+  saveRDS(meta, .cache_meta_path(cache_dir))
+  invisible(meta)
+}
+
 load_access_table_cached <- function(accdb_path, table_name, cache_dir) {
   cache_file <- file.path(cache_dir, paste0(table_name, ".rds"))
   cache_exists <- file.exists(cache_file)
@@ -383,11 +418,12 @@ load_access_table_cached <- function(accdb_path, table_name, cache_dir) {
     cache_mtime <- file.info(cache_file)$mtime
     accdb_mtime <- file.info(accdb_path)$mtime
     if (!is.na(cache_mtime) && !is.na(accdb_mtime) && cache_mtime >= accdb_mtime) {
+      .write_cache_source_meta(cache_dir, accdb_path, table_name)
       return(readRDS(cache_file))
     }
   }
   if (cache_exists && !accdb_exists) {
-    message("\u26a0\ufe0f  '", (if (!is.null(accdb_path) && nzchar(accdb_path)) basename(accdb_path) else "accdb"), "' ",
+    message("⚠️  '", (if (!is.null(accdb_path) && nzchar(accdb_path)) basename(accdb_path) else "accdb"), "' ",
             msg("no_accdb"), " ", msg("loading_cache"), " '", table_name, "'.")
     return(readRDS(cache_file))
   }
@@ -405,6 +441,7 @@ load_access_table_cached <- function(accdb_path, table_name, cache_dir) {
   on.exit(RODBC::odbcClose(con), add = TRUE)
   df <- RODBC::sqlFetch(con, table_name) |> clean_names()
   saveRDS(df, cache_file)
-  message("\u2705  Cached '", table_name, "' to ", cache_file)
+  .write_cache_source_meta(cache_dir, accdb_path, table_name)
+  message("✅  Cached '", table_name, "' to ", cache_file)
   df
 }
